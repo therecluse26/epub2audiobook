@@ -9,9 +9,12 @@ Mandarin Chinese — 54 voices. The language is detected from the book.
 
 ![GUI](docs/screenshot.png)
 
-**Hear it:** [30-second sample](docs/sample_en_af_heart.mp4) — the opening credits and the first
-lines of a chapter, exactly as the app produces them (English, voice `af_heart`, default settings;
-short excerpt from *Unlearn Your Pain* by Howard Schubiner, used for demonstration only).
+**Hear it** — the opening credits and the first lines of a chapter, exactly as the app produces
+them (English, voice `af_heart`, default settings; short excerpt from *Unlearn Your Pain* by
+Howard Schubiner, used for demonstration only). Also available as
+[MP3](docs/sample_en_af_heart.mp3) / [MP4](docs/sample_en_af_heart.mp4).
+
+https://github.com/user-attachments/assets/d7159dc1-c76a-4f7b-99f8-bb99cad2c0a2
 
 ## Features
 
