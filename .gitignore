@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*_work/
+*.m4b
+*.m4a
+*.wav
+*.epub
+.epub2audiobook.json
+*.egg-info/
+build/
+dist/

@@ -1,0 +1,16 @@
+# Python 3.10-3.12 required (kokoro does not yet support 3.13)
+# For NVIDIA GPU acceleration install torch first from the CUDA index:
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+torch
+kokoro>=0.9.4
+misaki[en,ja,zh]>=0.9.4
+espeakng-loader
+wxPython>=4.2
+ebooklib
+beautifulsoup4
+lxml
+soundfile
+numpy
+langdetect
+sounddevice
+mutagen

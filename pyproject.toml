@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "epub2audiobook"
+version = "0.1.0"
+description = "Turn EPUB e-books into chaptered M4B audiobooks with the free Kokoro neural voices (wxPython GUI + CLI)."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10,<3.13"
+authors = [{ name = "Marco Ghislanzoni" }]
+keywords = ["epub", "audiobook", "m4b", "tts", "kokoro", "text-to-speech"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+dependencies = [
+    "torch",
+    "kokoro>=0.9.4",
+    "misaki[en,ja,zh]>=0.9.4",
+    "espeakng-loader",
+    "wxPython>=4.2",
+    "ebooklib",
+    "beautifulsoup4",
+    "lxml",
+    "soundfile",
+    "numpy",
+    "langdetect",
+    "sounddevice",
+    "mutagen",
+]
+
+[project.scripts]
+epub2audiobook = "epub2audiobook.app:main"
+
+[project.urls]
+Homepage = "https://github.com/vr-marco/epub2audiobook"
+
+[tool.setuptools]
+packages = ["epub2audiobook"]
