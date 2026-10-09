@@ -315,7 +315,7 @@ def _extract_blocks(body: Tag) -> list[Block]:
             lvl = _is_heading_like(child)
             if lvl is not None:
                 flush()
-                text = _norm_ws(child.get_text(" ", strip=False))
+                text = _norm_ws(child.get_text("", strip=False))
                 if text:
                     blocks.append(Block("heading", text, lvl))
                 continue
@@ -326,7 +326,7 @@ def _extract_blocks(body: Tag) -> list[Block]:
             if child.name in _BLOCK_TAGS:
                 flush()
                 if child.find(_BLOCK_TAGS) is None:
-                    text = _norm_ws(child.get_text(" ", strip=False))
+                    text = _norm_ws(child.get_text("", strip=False))
                     if text:
                         blocks.append(Block("para", text))
                 else:
@@ -337,15 +337,45 @@ def _extract_blocks(body: Tag) -> list[Block]:
                 walk(child)
                 flush()
             else:
-                buf.append(child.get_text(" ", strip=False))
+                buf.append(child.get_text("", strip=False))
         flush()
 
     walk(body)
     return blocks
 
 
+_DROPCAP_RE = re.compile(r"^[\"\u201c\u2018']?[A-Z\u00C0-\u00DE]$")
+_DROPCAP_SPLIT_RE = re.compile(r"^([\"\u201c\u2018']?[B-HJ-Z\u00C0-\u00DE])\s+([a-z\u00DF-\u00FF]+)\b")
+
+
+def _merge_drop_caps(blocks: list[Block]) -> list[Block]:
+    """Join decorative initials with the word they start.
+
+    Publishers render drop caps as <span class="dropcap">T</span>he (handled by flattening without a
+    separator) or as a separate block/paragraph holding just the letter, which is what this merges.
+    """
+    out: list[Block] = []
+    i = 0
+    while i < len(blocks):
+        b = blocks[i]
+        if (b.kind == "para" and _DROPCAP_RE.match(b.text) and i + 1 < len(blocks)
+                and blocks[i + 1].kind == "para" and blocks[i + 1].text[:1].islower()):
+            nxt = blocks[i + 1]
+            out.append(Block("para", b.text + nxt.text, nxt.level))
+            i += 2
+            continue
+        if b.kind == "para":
+            # same thing inside one paragraph when the markup put whitespace after the initial
+            # ("T he word"). A and I are excluded: "A dog", "I am" are real words.
+            b.text = _DROPCAP_SPLIT_RE.sub(lambda m: m.group(1) + m.group(2), b.text, count=1)
+        out.append(b)
+        i += 1
+    return out
+
+
 def _postprocess_blocks(blocks: list[Block]) -> list[Block]:
     out: list[Block] = []
+    blocks = _merge_drop_caps(blocks)
     for b in blocks:
         if b.kind == "break":
             if out and out[-1].kind != "break":
