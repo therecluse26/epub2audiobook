@@ -93,7 +93,7 @@ BODY_KINDS = {
 SKIP_KINDS = {
     "cover", "titlepage", "halftitle", "copyright", "toc", "landmarks", "pagelist",
     "acknowledgments", "glossary", "index", "endnotes", "footnotes", "bibliography",
-    "about-author", "praise", "also-by", "ads", "resources", "colophon", "empty", "contributors",
+    "about-author", "about-publisher", "praise", "also-by", "ads", "resources", "colophon", "empty", "contributors",
     "imprint", "credits",
 }
 
@@ -129,6 +129,7 @@ _KEYWORD_RULES: list[tuple[str, str]] = [
     (r"\bindex\b|_idx_|^idx", "index"),
     (r"end[-_ ]?notes|footnotes|\bnotes\b|_end_|_not_|^notes", "endnotes"),
     (r"bibliograph|references|works[-_ ]cited|further[-_ ]reading|_bib_|_ref_", "bibliography"),
+    (r"about[-_ ]the[-_ ]publisher|about[-_ ]publisher|_atp_", "about-publisher"),
     (r"about[-_ ]the[-_ ]author|about[-_ ]author|_ata_|^ata_", "about-author"),
     (r"praise|_pra_|reviews?[-_ ]for", "praise"),
     (r"also[-_ ]by|other[-_ ]books|_alb_|books[-_ ]by", "also-by"),
@@ -157,6 +158,7 @@ _HEADING_KEYWORDS: list[tuple[str, str]] = [
     (r"^(end)?notes$", "endnotes"),
     (r"^(bibliography|references|works cited|further reading|sources)$", "bibliography"),
     (r"^about the author", "about-author"),
+    (r"^about the publisher", "about-publisher"),
     (r"^resources$", "resources"),
     (r"^praise for", "praise"),
     (r"^also by", "also-by"),
