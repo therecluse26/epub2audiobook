@@ -108,16 +108,24 @@ system install is needed.
    (`toc`, `endnotes`, `index`, …). *Smart selection* restores the defaults. Double-click a section
    (or *Show extracted text…*) to see the exact narration text.
 3. Choose **Language** (auto-detected), **Voice** (ordered by quality, letter grades from the Kokoro
-   authors), **Speed**, **Device** (Auto uses the GPU when available) and **AAC bitrate**
+   authors; you can also type any voice id), **Speed** and **AAC bitrate**
    (64k is plenty for speech; 128k roughly doubles the file size).
-4. **Preview voice** plays a sample from the selected section.
-5. **Convert to M4B.** The status line shows progress and ETA, the *Status* column tracks each
+4. **Speech engine.** *Local (Kokoro)* runs on this computer: pick the **Model** (Kokoro v1.0 with 9
+   languages, or v1.1-zh for Mandarin and English), the **Device** (Auto uses the GPU when available),
+   and optionally the **CPU threads** and a **Max VRAM** cap (0 = defaults). *OpenAI-compatible server*
+   sends the text to any server with OpenAI's speech API, such as a local
+   [Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI) or a hosted TTS service, several chunks
+   at a time (**Parallel**). The API key is read from the environment variable named in **API key var**
+   and is never saved.
+5. **Preview voice** plays a sample from the selected section.
+6. **Convert to M4B.** The status line shows progress and ETA, the *Status* column tracks each
    chapter (synthesizing → encoding → done), and the log shows details. *Cancel* keeps the finished
    chapters so the next run resumes.
-6. When finished, **Test in player** opens the M4B in the built-in player. Its *Checks* line confirms
+7. When finished, **Test in player** opens the M4B in the built-in player. Its *Checks* line confirms
    chapters, cover, tags and the Apple audiobook flag.
 
-Settings (voice per language, speed, bitrate, …) are remembered in `%USERPROFILE%\.epub2audiobook.json`.
+Settings (voice per language, speed, bitrate, speech engine, …; never the API key) are remembered in
+`%USERPROFILE%\.epub2audiobook.json`.
 
 ## Getting the M4B onto an iPhone
 
@@ -141,11 +149,19 @@ Android: any audiobook player that reads M4B (Smart AudioBook Player, Voice, Lis
 .venv\Scripts\python.exe -m epub2audiobook book.epub --dump-text 10   # show extracted text of section 10
 .venv\Scripts\python.exe -m epub2audiobook book.epub -o out.m4b       # convert with smart selection
 .venv\Scripts\python.exe -m epub2audiobook book.epub -c 8-31 -v af_bella -s 1.05 --bitrate 64k
-.venv\Scripts\python.exe -m epub2audiobook --voices book.epub         # list voices per language
+.venv\Scripts\python.exe -m epub2audiobook --voices book.epub         # list voices per language (of --model)
 .venv\Scripts\python.exe -m epub2audiobook --play out.m4b             # open the test player
 .venv\Scripts\python.exe -m epub2audiobook --fix-tags old.m4b         # add Apple audiobook atoms to an existing file
+.venv\Scripts\python.exe -m epub2audiobook book.epub --model kokoro-v1.1-zh --threads 6 --max-vram 2
+.venv\Scripts\python.exe -m epub2audiobook book.epub --provider openai --base-url http://localhost:8880/v1 --concurrency 8
 .venv\Scripts\python.exe -m epub2audiobook book.epub --help
 ```
+
+With `--provider openai`, the text goes to any server with OpenAI's `POST /v1/audio/speech` API
+(`--api-model` names its model, e.g. `kokoro` or `tts-1`). The API key is read from `OPENAI_API_KEY`
+(or the variable named by `--api-key-env`), never from the command line. The log shows how many
+characters are sent, because paid APIs bill per character. A wrong URL, key, model or voice stops the
+run at once instead of producing silence.
 
 ## Project layout
 
@@ -153,13 +169,16 @@ Android: any audiobook player that reads M4B (Smart AudioBook Player, Voice, Lis
 |---|---|
 | `epub2audiobook/epub_parser.py` | EPUB → chapters/blocks; section classification; note/page-number/header stripping |
 | `epub2audiobook/textproc.py` | text normalisation (note markers, typography, roman numerals) and sentence-aware chunking |
-| `epub2audiobook/tts.py` | Kokoro engine wrapper (device selection, per-language pipelines) |
+| `epub2audiobook/tts.py` | speech-engine interface and settings; local Kokoro engine (model, device, CPU threads, VRAM cap, per-language pipelines) |
+| `epub2audiobook/tts_openai.py` | engine for OpenAI-compatible TTS servers (parallel requests, retries, resampling) |
+| `epub2audiobook/voices.py` | local models and their languages and voices |
 | `epub2audiobook/audio.py` | silence trimming/pauses/levelling, per-chapter AAC encoding, M4B mux with chapters/cover, Apple audiobook tagging |
 | `epub2audiobook/converter.py` | orchestration: credits, chapters, overlapped encoding, progress/cancel, per-chapter cache |
 | `epub2audiobook/gui.py` | wxPython application |
 | `epub2audiobook/player.py` | built-in M4B test player (ffprobe/ffmpeg + sounddevice) |
 | `epub2audiobook/cli.py`, `app.py` | command-line interface and entry-point dispatcher |
 | `setup.ps1`, `run_gui.bat` | Windows setup and launcher |
+| `tests/` | pytest tests for the engines and the converter (`python -m pytest tests`) |
 
 ## Troubleshooting
 

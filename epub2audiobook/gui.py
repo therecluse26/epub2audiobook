@@ -18,8 +18,8 @@ from .audio import find_ffmpeg, open_in_explorer, write_wav
 from .converter import CancelledError, ConvertOptions, Converter, preview_audio
 from .epub_parser import Book, Chapter, detect_language_from_text, load_book
 from .player import PlayerFrame
-from .tts import KokoroEngine, device_description
-from .voices import LANGUAGES, VOICES, default_voice, iso_to_kokoro
+from .tts import EngineConfig, EngineError, TTSEngine, create_engine, device_description
+from .voices import DEFAULT_MODEL, LANGUAGES, MODELS, default_voice, iso_to_kokoro, voices_for
 
 SETTINGS_FILE = Path.home() / ".epub2audiobook.json"
 WORDS_PER_MIN = 155  # Kokoro at speed 1.0, roughly
@@ -85,7 +85,8 @@ class MainFrame(wx.Frame):
         self.SetSize(self.FromDIP(wx.Size(1240, 860)))
         self.SetMinSize(self.FromDIP(wx.Size(1000, 700)))
         self.book: Optional[Book] = None
-        self.engine: Optional[KokoroEngine] = None
+        self.engine: Optional[TTSEngine] = None
+        self._engine_cfg: Optional[EngineConfig] = None
         self.worker: Optional[threading.Thread] = None
         self.cancel_event = threading.Event()
         self.settings = load_settings()
@@ -152,21 +153,18 @@ class MainFrame(wx.Frame):
         self._lang_codes = list(LANGUAGES.keys())
         g.Add(self.lang_choice, 1, wx.EXPAND)
         g.Add(wx.StaticText(sb, label="Voice:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.voice_choice = wx.Choice(sb, choices=[])
+        self.voice_choice = wx.ComboBox(sb, choices=[], style=wx.CB_DROPDOWN)  # editable: servers may have other voices
+        self.voice_choice.SetToolTip("Pick a voice, or type any voice id the server knows (e.g. alloy for OpenAI).")
         g.Add(self.voice_choice, 1, wx.EXPAND)
         g.Add(wx.StaticText(sb, label="Speed:"), 0, wx.ALIGN_CENTER_VERTICAL)
         self.speed = wx.SpinCtrlDouble(sb, min=0.6, max=1.5, inc=0.05, initial=float(self.settings.get("speed", 1.0)))
         self.speed.SetDigits(2)
         g.Add(self.speed, 0)
-        g.Add(wx.StaticText(sb, label="Device:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.device_choice = wx.Choice(sb, choices=["Auto", "CUDA (GPU)", "CPU"])
-        self.device_choice.SetSelection({"auto": 0, "cuda": 1, "cpu": 2}.get(self.settings.get("device", "auto"), 0))
-        g.Add(self.device_choice, 1, wx.EXPAND)
         g.Add(wx.StaticText(sb, label="AAC bitrate:"), 0, wx.ALIGN_CENTER_VERTICAL)
         self.bitrate_choice = wx.Choice(sb, choices=["48k", "64k", "96k", "128k"])
         self.bitrate_choice.SetStringSelection(self.settings.get("bitrate", "64k"))
         g.Add(self.bitrate_choice, 1, wx.EXPAND)
-        for c in (self.lang_choice, self.voice_choice, self.device_choice, self.bitrate_choice):
+        for c in (self.lang_choice, self.voice_choice, self.bitrate_choice):
             c.SetMinSize(d(wx.Size(120, -1)))   # sizer uses this instead of the (wide) best size; EXPAND fills the column
         set_sz.Add(g, 0, wx.EXPAND | wx.ALL, d(4))
         self.chk_credits = wx.CheckBox(sb, label="Read opening credits (title, subtitle, author)")
@@ -184,6 +182,53 @@ class MainFrame(wx.Frame):
         prow.Add(self.btn_stop_preview, 0)
         set_sz.Add(prow, 0, wx.EXPAND | wx.ALL, d(4))
         left.Add(set_sz, 0, wx.EXPAND | wx.BOTTOM, d(8))
+
+        eng_sz = wx.StaticBoxSizer(wx.VERTICAL, self.left, "Speech engine")
+        eb = eng_sz.GetStaticBox()
+        eg = wx.FlexGridSizer(0, 2, d(6), d(6))
+        eg.AddGrowableCol(1, 1)
+        s = self.settings
+
+        def row(label: str, ctrl: wx.Window, tip: str = "") -> tuple[wx.StaticText, wx.Window]:
+            lbl = wx.StaticText(eb, label=label)
+            eg.Add(lbl, 0, wx.ALIGN_CENTER_VERTICAL)
+            eg.Add(ctrl, 1, wx.EXPAND)
+            if tip:
+                ctrl.SetToolTip(tip)
+            return lbl, ctrl
+
+        self.engine_choice = wx.Choice(eb, choices=["Local (Kokoro)", "OpenAI-compatible server"])
+        self.engine_choice.SetSelection(1 if s.get("engine_provider") == "openai" else 0)
+        row("Engine:", self.engine_choice)
+        self._model_keys = list(MODELS)
+        self.model_choice = wx.Choice(eb, choices=[label for _, label in MODELS.values()])
+        self.model_choice.SetSelection(self._model_keys.index(s.get("model", DEFAULT_MODEL))
+                                       if s.get("model") in MODELS else 0)
+        self.device_choice = wx.Choice(eb, choices=["Auto", "CUDA (GPU)", "CPU"])
+        self.device_choice.SetSelection({"auto": 0, "cuda": 1, "cpu": 2}.get(s.get("device", "auto"), 0))
+        self.threads_spin = wx.SpinCtrl(eb, min=0, max=256, initial=int(s.get("threads", 0)))
+        self.vram_spin = wx.SpinCtrlDouble(eb, min=0.0, max=256.0, inc=0.5, initial=float(s.get("max_vram_gb", 0.0)))
+        self.vram_spin.SetDigits(1)
+        self._local_rows = [row("Model:", self.model_choice),
+                            row("Device:", self.device_choice),
+                            row("CPU threads:", self.threads_spin, "0 = PyTorch default (one per physical core)"),
+                            row("Max VRAM (GB):", self.vram_spin, "Cap on PyTorch's GPU memory (CUDA only). 0 = no cap")]
+        self.url_text = wx.TextCtrl(eb, value=s.get("base_url", "http://localhost:8880/v1"))
+        self.api_model_text = wx.TextCtrl(eb, value=s.get("api_model", "kokoro"))
+        self.key_env_text = wx.TextCtrl(eb, value=s.get("api_key_env", "OPENAI_API_KEY"))
+        self.parallel_spin = wx.SpinCtrl(eb, min=1, max=64, initial=int(s.get("concurrency", 4)))
+        self._server_rows = [row("Server URL:", self.url_text, "Base URL of an OpenAI-compatible TTS server, "
+                                                               "e.g. http://localhost:8880/v1 (Kokoro-FastAPI)"),
+                             row("Model name:", self.api_model_text, "Model name the server expects, e.g. kokoro "
+                                                                     "or tts-1"),
+                             row("API key var:", self.key_env_text, "Environment variable that holds the API key. "
+                                                                    "The key itself is never saved."),
+                             row("Parallel:", self.parallel_spin, "Requests sent at the same time")]
+        for c in (self.engine_choice, self.model_choice, self.device_choice, self.url_text, self.api_model_text,
+                  self.key_env_text):
+            c.SetMinSize(d(wx.Size(120, -1)))
+        eng_sz.Add(eg, 0, wx.EXPAND | wx.ALL, d(4))
+        left.Add(eng_sz, 0, wx.EXPAND | wx.BOTTOM, d(8))
 
         self.btn_player = wx.Button(self.left, label="Play / test an M4B…")
         left.Add(self.btn_player, 0, wx.EXPAND)
@@ -248,8 +293,11 @@ class MainFrame(wx.Frame):
         self.btn_cancel.Bind(wx.EVT_BUTTON, lambda e: self.cancel_event.set())
         self.speed.Bind(wx.EVT_SPINCTRLDOUBLE, lambda e: self._update_selection_label())
         self.left.Bind(wx.EVT_SIZE, self._on_left_size)
+        self.engine_choice.Bind(wx.EVT_CHOICE, lambda e: self._on_engine_changed())
+        self.model_choice.Bind(wx.EVT_CHOICE, lambda e: self._on_engine_changed())
 
-        self._set_lang(self.settings.get("lang", "a"), voice=self.settings.get("voice"))
+        self._show_engine_rows()
+        self._fill_langs(self.settings.get("lang", "a"), voice=self.settings.get("voice"))
 
     # ------------------------------------------------------------------ helpers
     def _log(self, msg: str):
@@ -280,37 +328,83 @@ class MainFrame(wx.Frame):
 
     def _set_lang(self, code: str, voice: Optional[str] = None):
         if code not in self._lang_codes:
+            if code in LANGUAGES:
+                self._log(f"{MODELS[self._voice_model()][1]} cannot narrate {LANGUAGES[code]}: pick another model.")
             code = "a"
         self.lang_choice.SetSelection(self._lang_codes.index(code))
         self._fill_voices(code, voice)
 
+    def _fill_langs(self, code: Optional[str] = None, voice: Optional[str] = None):
+        """Language list of the current model; keeps `code` (default: the current language) when possible."""
+        code = code or self.current_lang()
+        self._lang_codes = [c for c in LANGUAGES if c in voices_for(self._voice_model())]
+        self.lang_choice.Set([LANGUAGES[c] for c in self._lang_codes])
+        self._set_lang(code, voice or self.settings.get(f"voice_{code}"))
+
     def _fill_voices(self, code: str, voice: Optional[str] = None):
         self.voice_choice.Clear()
-        self._voice_ids = [v for v, _ in VOICES[code]]
-        for v, label in VOICES[code]:
+        voices = voices_for(self._voice_model()).get(code, [])
+        self._voice_ids = [v for v, _ in voices]
+        for v, label in voices:
             self.voice_choice.Append(f"{label}  [{v}]")
-        sel = self._voice_ids.index(voice) if voice in self._voice_ids else 0
-        self.voice_choice.SetSelection(sel)
+        if voice and voice not in self._voice_ids and self._is_server():
+            self.voice_choice.SetValue(voice)  # a voice id typed for a server earlier
+        elif self._voice_ids:
+            self.voice_choice.SetSelection(self._voice_ids.index(voice) if voice in self._voice_ids else 0)
 
     def current_lang(self) -> str:
         return self._lang_codes[max(0, self.lang_choice.GetSelection())]
 
     def current_voice(self) -> str:
         i = self.voice_choice.GetSelection()
-        return self._voice_ids[i] if 0 <= i < len(self._voice_ids) else default_voice(self.current_lang())
+        text = self.voice_choice.GetValue().strip()
+        if 0 <= i < len(self._voice_ids) and text == self.voice_choice.GetString(i):
+            return self._voice_ids[i]
+        if text.endswith("]") and "[" in text:  # a list entry whose selection index got lost
+            return text.rsplit("[", 1)[1].rstrip("]")
+        return text or default_voice(self.current_lang(), self._voice_model())
 
     def current_device(self) -> str:
         return ["auto", "cuda", "cpu"][max(0, self.device_choice.GetSelection())]
 
+    def _is_server(self) -> bool:
+        return self.engine_choice.GetSelection() == 1
+
+    def _voice_model(self) -> str:
+        """Model whose voices and languages apply: the local model, or Kokoro v1.0 for a server (Kokoro-FastAPI)."""
+        return DEFAULT_MODEL if self._is_server() else self._model_keys[max(0, self.model_choice.GetSelection())]
+
+    def _show_engine_rows(self):
+        for rows, show in ((self._local_rows, not self._is_server()), (self._server_rows, self._is_server())):
+            for lbl, ctrl in rows:
+                lbl.Show(show)
+                ctrl.Show(show)
+        self.left.Layout()
+        self.left.FitInside()
+
+    def _on_engine_changed(self):
+        self._show_engine_rows()
+        self._fill_langs()
+
     def on_lang_changed(self, _):
         self._fill_voices(self.current_lang(), self.settings.get(f"voice_{self.current_lang()}"))
 
-    def _get_engine(self) -> KokoroEngine:
-        dev = self.current_device()
-        if self.engine is None or (dev != "auto" and self.engine.device != dev):
+    def current_engine_config(self) -> EngineConfig:
+        return EngineConfig(provider="openai" if self._is_server() else "local", model=self._voice_model(),
+                            device=self.current_device(), threads=self.threads_spin.GetValue(),
+                            max_vram_gb=float(self.vram_spin.GetValue()), base_url=self.url_text.GetValue().strip(),
+                            api_model=self.api_model_text.GetValue().strip() or "kokoro",
+                            api_key_env=self.key_env_text.GetValue().strip() or "OPENAI_API_KEY",
+                            concurrency=self.parallel_spin.GetValue())
+
+    def _get_engine(self) -> TTSEngine:
+        """The engine for the current settings (call from the GUI thread); rebuilt only when a setting changed."""
+        cfg = self.current_engine_config()
+        if self.engine is None or cfg != self._engine_cfg:
             if self.engine is not None:
                 self.engine.release()
-            self.engine = KokoroEngine(dev)
+            self.engine = create_engine(cfg)
+            self._engine_cfg = cfg
         return self.engine
 
     def _selected_chapters(self) -> list[Chapter]:
@@ -352,7 +446,9 @@ class MainFrame(wx.Frame):
     def _busy(self, busy: bool):
         for w in (self.epub_picker, self.out_picker, self.btn_convert, self.btn_preview, self.btn_all, self.btn_none,
                   self.btn_smart, self.lang_choice, self.voice_choice, self.speed, self.device_choice, self.bitrate_choice,
-                  self.chk_titles, self.chk_credits, self.chk_keep):
+                  self.chk_titles, self.chk_credits, self.chk_keep, self.engine_choice, self.model_choice,
+                  self.threads_spin, self.vram_spin, self.url_text, self.api_model_text, self.key_env_text,
+                  self.parallel_spin):
             w.Enable(not busy)
         self.btn_cancel.Enable(busy)
 
@@ -461,6 +557,11 @@ class MainFrame(wx.Frame):
         if not text:
             text = "This is a preview of the selected voice, reading a short sample so you can judge its tone and pacing."
         lang, voice, speed = self.current_lang(), self.current_voice(), float(self.speed.GetValue())
+        try:
+            engine = self._get_engine()
+        except EngineError as e:
+            wx.MessageBox(str(e), "Speech engine", wx.ICON_WARNING)
+            return
         self._stop_preview()
         self._busy(True)
         self.btn_cancel.Disable()
@@ -468,7 +569,7 @@ class MainFrame(wx.Frame):
 
         def work():
             try:
-                audio = preview_audio(lang, voice, text, speed, self._get_engine())
+                audio = preview_audio(lang, voice, text, speed, engine)
                 tmp = Path(tempfile.gettempdir()) / "epub2audiobook_preview.wav"
                 write_wav(tmp, audio)
                 wx.CallAfter(self._play_preview, tmp)
@@ -534,14 +635,24 @@ class MainFrame(wx.Frame):
         if not out.lower().endswith(".m4b"):
             out += ".m4b"
         lang = self.current_lang()
+        try:
+            engine = self._get_engine()
+        except EngineError as e:
+            wx.MessageBox(str(e), "Speech engine", wx.ICON_WARNING)
+            return
+        cfg = self._engine_cfg
         opts = ConvertOptions(output_path=out, voice=self.current_voice(), lang=lang, speed=float(self.speed.GetValue()),
-                              device=self.current_device(), bitrate=self.bitrate_choice.GetStringSelection() or "64k",
+                              engine=cfg, bitrate=self.bitrate_choice.GetStringSelection() or "64k",
                               read_titles=self.chk_titles.GetValue(), read_credits=self.chk_credits.GetValue(),
                               keep_work_files=self.chk_keep.GetValue())
         self.settings.update({"lang": lang, "voice": opts.voice, f"voice_{lang}": opts.voice, "speed": opts.speed,
-                              "device": opts.device, "bitrate": opts.bitrate, "read_titles": opts.read_titles,
+                              "bitrate": opts.bitrate, "read_titles": opts.read_titles,
                               "read_credits": opts.read_credits, "keep_work_files": opts.keep_work_files,
-                              "last_out_dir": str(Path(out).parent)})
+                              "last_out_dir": str(Path(out).parent),
+                              "engine_provider": cfg.provider, "model": cfg.model, "device": cfg.device,
+                              "threads": cfg.threads, "max_vram_gb": cfg.max_vram_gb, "base_url": cfg.base_url,
+                              "api_model": cfg.api_model, "api_key_env": cfg.api_key_env,
+                              "concurrency": cfg.concurrency})
         save_settings(self.settings)
         self._stop_preview()
         self.cancel_event.clear()
@@ -562,7 +673,7 @@ class MainFrame(wx.Frame):
 
         def work():
             try:
-                conv = Converter(self.book, chapters, opts, on_progress, on_log, self.cancel_event, self._get_engine(),
+                conv = Converter(self.book, chapters, opts, on_progress, on_log, self.cancel_event, engine,
                                  on_chapter=on_chapter)
                 result = conv.run()
                 wx.CallAfter(self._convert_done, result)

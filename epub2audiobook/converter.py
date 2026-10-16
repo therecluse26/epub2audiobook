@@ -1,9 +1,9 @@
 """Conversion orchestrator: book + selected chapters + options -> chaptered M4B.
 
-Pipeline per chapter: synthesize (GPU) -> WAV -> AAC (.m4a, background ffmpeg, overlapped with the
-next chapter's synthesis). The final step is a stream-copy mux of the chapter files, which takes
-seconds. Runs synchronously in the calling thread; the GUI runs it in a worker thread and passes
-callbacks + a cancel event.
+Pipeline per chapter: synthesize (local GPU/CPU, or parallel requests to a TTS server) -> WAV -> AAC
+(.m4a, background ffmpeg, overlapped with the next chapter's synthesis). The final step is a
+stream-copy mux of the chapter files, which takes seconds. Runs synchronously in the calling thread;
+the GUI runs it in a worker thread and passes callbacks + a cancel event.
 """
 from __future__ import annotations
 
@@ -14,7 +14,8 @@ import shutil
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, asdict
+from concurrent.futures import TimeoutError as FutureTimeout  # not the builtin TimeoutError on Python 3.10
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -25,8 +26,8 @@ from .audio import (SAMPLE_RATE, build_m4b, encode_chapter_aac, fade_edges, find
                     prepare_cover, silence, trim_silence, write_wav)
 from .epub_parser import Book, Chapter
 from .textproc import chunk_paragraph, normalize_text
-from .tts import KokoroEngine
-from .voices import default_voice
+from .tts import EngineConfig, EngineError, TTSEngine, create_engine
+from .voices import DEFAULT_MODEL, default_voice
 
 log = logging.getLogger(__name__)
 
@@ -61,7 +62,7 @@ class ConvertOptions:
     voice: str = "af_heart"
     lang: str = "a"
     speed: float = 1.0
-    device: str = "auto"
+    engine: EngineConfig = field(default_factory=EngineConfig)
     bitrate: str = "64k"
     max_chars: int = 350
     read_titles: bool = True
@@ -80,8 +81,10 @@ class ConvertOptions:
 
     def cache_key(self) -> str:
         d = asdict(self)
-        for k in ("output_path", "device", "bitrate", "keep_work_files", "work_dir", "encode_workers"):
+        for k in ("output_path", "engine", "bitrate", "keep_work_files", "work_dir", "encode_workers"):
             d.pop(k, None)
+        if self.engine.audio_identity():
+            d["engine"] = self.engine.audio_identity()
         d["v"] = __version__
         return repr(sorted(d.items()))
 
@@ -89,12 +92,13 @@ class ConvertOptions:
 ProgressCb = Callable[[float, str], None]
 LogCb = Callable[[str], None]
 ChapterCb = Callable[[int, str], None]   # (chapter.index or 0 for credits, state) state: synth|encode|done|cached
+Step = tuple[Optional[str], float, int]  # (text to speak or None for a pure pause, seconds of silence after, chars)
 
 
 class Converter:
     def __init__(self, book: Book, chapters: list[Chapter], options: ConvertOptions,
                  on_progress: Optional[ProgressCb] = None, on_log: Optional[LogCb] = None,
-                 cancel_event: Optional[threading.Event] = None, engine: Optional[KokoroEngine] = None,
+                 cancel_event: Optional[threading.Event] = None, engine: Optional[TTSEngine] = None,
                  on_chapter: Optional[ChapterCb] = None):
         self.book = book
         self.chapters = chapters
@@ -103,7 +107,7 @@ class Converter:
         self._log = on_log or (lambda m: log.info(m))
         self._chapter_cb = on_chapter or (lambda i, s: None)
         self._cancel = cancel_event or threading.Event()
-        self.engine = engine or KokoroEngine(options.device)
+        self.engine = engine or create_engine(options.engine)
         self.total_chars = 0
         self.done_chars = 0
         self._t0 = 0.0
@@ -140,15 +144,17 @@ class Converter:
 
         self.total_chars = sum(ch.chars + len(ch.title) for ch in self.chapters)
         self.done_chars = 0
-        voice = opt.voice or default_voice(opt.lang)
+        voice = opt.voice or default_voice(opt.lang, opt.engine.model if opt.engine.provider == "local" else DEFAULT_MODEL)
         workers = opt.encode_workers or max(1, min(4, (os.cpu_count() or 2) // 2))
 
         self._log(f"Book: {self.book.title} — {self.book.author or 'unknown author'}")
         self._log(f"Language: {opt.lang}  Voice: {voice}  Speed: {opt.speed}  Chapters: {len(self.chapters)}  "
                   f"AAC {opt.bitrate} ({workers} encoder thread{'s' if workers > 1 else ''})")
-        self._progress(0.0, "Loading Kokoro model…")
+        self._progress(0.0, "Loading speech engine…")
         self.engine.warm_up(opt.lang, voice)
-        self._log(f"Kokoro loaded on {self.engine.device.upper()}")
+        self._log(f"Speech engine: {self.engine.describe()}")
+        if opt.engine.provider != "local":
+            self._log(f"About {self.total_chars:,} characters will be sent to the server (paid APIs bill per character)")
 
         # (index, title, m4a_path, duration) in playback order; futures fill in durations
         items: list[tuple[int, str, Path, float]] = []
@@ -267,6 +273,8 @@ class Converter:
         opt = self.opt
         try:
             a = self.engine.synthesize(text, voice, opt.lang, opt.speed)
+        except EngineError:
+            raise  # wrong URL/key/model/voice: smaller pieces would fail too, and the book would come out silent
         except Exception as e:  # e.g. OOM or G2P hiccup: split and retry
             self._log(f"    warning: synthesis failed ({type(e).__name__}: {str(e)[:80]}), retrying in halves")
             if len(text) < 40:
@@ -278,64 +286,85 @@ class Converter:
             return np.concatenate([left, silence(opt.pause_chunk), right]) if left.size or right.size else left
         return fade_edges(trim_silence(a))
 
+    def _speak(self, steps: list[Step], voice: str, label: str) -> list[Optional[np.ndarray]]:
+        """Audio for each step, in order (None for pauses). Server engines get up to engine.max_parallel chunks
+        at once; the local engine (max_parallel 1) runs them one at a time in this thread."""
+        par = self.engine.max_parallel
+        pool = ThreadPoolExecutor(max_workers=par, thread_name_prefix="tts") if par > 1 else None
+        try:
+            pending = [pool.submit(self._synth, text, voice) if pool and text is not None else None
+                       for text, _, _ in steps]
+            out: list[Optional[np.ndarray]] = []
+            spoken = 0
+            for (text, _, chars), fut in zip(steps, pending):
+                self._check_cancel()
+                if text is None:
+                    out.append(None)
+                else:
+                    out.append(self._wait(fut) if fut else self._synth(text, voice))
+                    spoken += 1
+                self.done_chars += chars
+                if text is not None and spoken % 4 == 0:
+                    self._report(label)
+            return out
+        finally:
+            if pool:
+                pool.shutdown(wait=False, cancel_futures=True)
+
+    def _wait(self, fut: Future) -> np.ndarray:
+        while True:
+            self._check_cancel()
+            try:
+                return fut.result(timeout=0.5)
+            except FutureTimeout:
+                pass
+
+    def _assemble(self, steps: list[Step], audios: list[Optional[np.ndarray]], parts: list[np.ndarray]) -> None:
+        for (text, pause, _), a in zip(steps, audios):
+            if text is None:
+                if pause:
+                    parts.append(silence(pause))
+            elif a.size:
+                parts += [a, silence(pause)]
+
     def _synthesize_credits(self, voice: str) -> np.ndarray:
         """Opening credits like a professional audiobook: title, subtitle, 'written by' authors."""
         lang = self.opt.lang
-        parts: list[np.ndarray] = [silence(0.8)]
         lines = [normalize_text(self.book.title, lang, is_heading=True)]
         if self.book.subtitle:
             lines.append(normalize_text(self.book.subtitle, lang, is_heading=True))
         if self.book.authors:
             lines.append(credits_author_line(self.book.authors, lang))
-        for i, line in enumerate(lines):
-            self._check_cancel()
-            a = self._synth(line, voice)
-            if a.size:
-                parts += [a, silence(1.0 if i < len(lines) - 1 else 1.8)]
+        steps = [(line, 1.0 if i < len(lines) - 1 else 1.8, 0) for i, line in enumerate(lines)]
+        parts: list[np.ndarray] = [silence(0.8)]
+        self._assemble(steps, self._speak(steps, voice, "Opening credits"), parts)
         return np.concatenate(parts)
 
     def _synthesize_chapter(self, ch: Chapter, voice: str, n: int, total: int) -> np.ndarray:
         opt = self.opt
-        parts: list[np.ndarray] = [silence(opt.pause_chapter_start)]
         blocks = ch.blocks
         label = f"Chapter {n}/{total}: {ch.title[:40]}"
         first_is_heading = bool(blocks) and blocks[0].kind == "heading"
+        steps: list[Step] = []
         if opt.read_titles and not first_is_heading and ch.title:
-            self._check_cancel()
-            a = self._synth(normalize_text(ch.title, opt.lang, is_heading=True), voice)
-            if a.size:
-                parts += [a, silence(opt.pause_heading)]
-            self.done_chars += len(ch.title)
-        chunk_count = 0
+            steps.append((normalize_text(ch.title, opt.lang, is_heading=True), opt.pause_heading, len(ch.title)))
         for b in blocks:
-            self._check_cancel()
             if b.kind == "break":
-                parts.append(silence(opt.pause_break))
+                steps.append((None, opt.pause_break, 0))
                 continue
             text = normalize_text(b.text, opt.lang, is_heading=(b.kind == "heading"))
             if not text:
-                self.done_chars += len(b.text)
-                continue
-            if b.kind == "heading":
-                a = self._synth(text, voice)
-                if a.size:
-                    parts += [a, silence(opt.pause_heading)]
-                self.done_chars += len(b.text)
-                self._report(label)
-                continue
-            chunks = chunk_paragraph(text, opt.lang, opt.max_chars)
-            for ci, chunk in enumerate(chunks):
-                self._check_cancel()
-                a = self._synth(chunk, voice)
-                if a.size:
-                    parts.append(a)
-                    parts.append(silence(opt.pause_chunk if ci < len(chunks) - 1 else opt.pause_para))
-                chunk_count += 1
-                self.done_chars += len(chunk)
-                if chunk_count % 4 == 0:
-                    self._report(label)
+                steps.append((None, 0.0, len(b.text)))
+            elif b.kind == "heading":
+                steps.append((text, opt.pause_heading, len(b.text)))
+            else:
+                chunks = chunk_paragraph(text, opt.lang, opt.max_chars)
+                steps += [(c, opt.pause_chunk if ci < len(chunks) - 1 else opt.pause_para, len(c))
+                          for ci, c in enumerate(chunks)]
+        parts: list[np.ndarray] = [silence(opt.pause_chapter_start)]
+        self._assemble(steps, self._speak(steps, voice, label), parts)
         parts.append(silence(opt.pause_chapter_end))
-        return np.concatenate(parts) if parts else silence(1.0)
+        return np.concatenate(parts)
 
 
 def _duration_of(m4a: Path, wav: Path) -> float:
@@ -356,10 +385,10 @@ def _duration_of(m4a: Path, wav: Path) -> float:
         return 0.0
 
 
-def preview_audio(book_lang: str, voice: str, text: str, speed: float = 1.0, engine: Optional[KokoroEngine] = None,
+def preview_audio(book_lang: str, voice: str, text: str, speed: float = 1.0, engine: Optional[TTSEngine] = None,
                   max_chars: int = 350) -> np.ndarray:
     """Synthesize a short sample (used by the GUI preview)."""
-    engine = engine or KokoroEngine("auto")
+    engine = engine or create_engine(EngineConfig())
     parts: list[np.ndarray] = []
     for chunk in chunk_paragraph(normalize_text(text, book_lang), book_lang, max_chars)[:3]:
         a = engine.synthesize(chunk, voice, book_lang, speed)

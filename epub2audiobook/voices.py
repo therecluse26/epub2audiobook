@@ -1,5 +1,13 @@
-"""Language and voice catalogue for Kokoro-82M (v1.0 weights)."""
+"""Language and voice catalogue for the local models (Kokoro-82M v1.0 and v1.1-zh weights)."""
 from __future__ import annotations
+
+# Local models offered by the model picker: key -> (Hugging Face repo, label).
+# Keys carry the model family, so other families (Piper, XTTS, ...) can be added next to Kokoro later.
+MODELS = {
+    "kokoro-v1.0": ("hexgrad/Kokoro-82M", "Kokoro-82M v1.0 (9 languages)"),
+    "kokoro-v1.1-zh": ("hexgrad/Kokoro-82M-v1.1-zh", "Kokoro-82M v1.1-zh (Mandarin, English)"),
+}
+DEFAULT_MODEL = "kokoro-v1.0"
 
 # Kokoro language codes -> human names
 LANGUAGES = {
@@ -103,8 +111,29 @@ VOICES = {
 }
 
 
-def default_voice(lang_code: str) -> str:
-    return VOICES.get(lang_code, VOICES["a"])[0][0]
+# Kokoro-82M v1.1-zh: 100 numbered Mandarin voices plus three English ones (no quality grades published).
+_V11_ZF = ("001 002 003 004 005 006 007 008 017 018 019 021 022 023 024 026 027 028 032 036 038 039 040 042 043 044 "
+           "046 047 048 049 051 059 060 067 070 071 072 073 074 075 076 077 078 079 083 084 085 086 087 088 090 092 "
+           "093 094 099").split()
+_V11_ZM = ("009 010 011 012 013 014 015 016 020 025 029 030 031 033 034 035 037 041 045 050 052 053 054 055 056 057 "
+           "058 061 062 063 064 065 066 068 069 080 081 082 089 091 095 096 097 098 100").split()
+VOICES_V11_ZH = {
+    "a": [("af_maple", "Maple (female)"), ("af_sol", "Sol (female)")],
+    "b": [("bf_vale", "Vale (female)")],
+    "z": [(f"zf_{n}", f"Female {n}") for n in _V11_ZF] + [(f"zm_{n}", f"Male {n}") for n in _V11_ZM],
+}
+
+_MODEL_VOICES = {"kokoro-v1.0": VOICES, "kokoro-v1.1-zh": VOICES_V11_ZH}
+
+
+def voices_for(model: str) -> dict[str, list[tuple[str, str]]]:
+    """Voices per language for a local model; its keys are the languages the model can narrate."""
+    return _MODEL_VOICES.get(model, VOICES)
+
+
+def default_voice(lang_code: str, model: str = DEFAULT_MODEL) -> str:
+    voices = voices_for(model)
+    return voices.get(lang_code, next(iter(voices.values())))[0][0]
 
 
 def iso_to_kokoro(iso: str | None) -> str | None:

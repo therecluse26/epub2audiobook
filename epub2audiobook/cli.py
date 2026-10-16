@@ -2,13 +2,15 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import threading
 from pathlib import Path
 
 from .converter import CancelledError, ConvertOptions, Converter
 from .epub_parser import detect_language_from_text, load_book
-from .voices import LANGUAGES, VOICES, default_voice, iso_to_kokoro
+from .tts import EngineConfig, EngineError
+from .voices import DEFAULT_MODEL, LANGUAGES, MODELS, default_voice, iso_to_kokoro, voices_for
 
 
 def parse_ranges(spec: str, n: int) -> list[int]:
@@ -38,19 +40,32 @@ def main(argv=None):
     p.add_argument("--lang", choices=sorted(LANGUAGES), help="Kokoro language code (default: from EPUB metadata)")
     p.add_argument("-v", "--voice", help="Kokoro voice id (default: best voice for the language)")
     p.add_argument("-s", "--speed", type=float, default=1.0)
-    p.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     p.add_argument("--bitrate", default="64k")
     p.add_argument("--no-titles", action="store_true", help="do not announce chapter titles")
     p.add_argument("--no-credits", action="store_true", help="skip the opening credits (title, subtitle, author)")
     p.add_argument("--keep", action="store_true", help="keep per-chapter WAV work files")
     p.add_argument("--work-dir")
-    p.add_argument("--voices", action="store_true", help="list available voices and exit")
+    p.add_argument("--voices", action="store_true", help="list the voices of --model and exit")
+    e = p.add_argument_group("speech engine")
+    e.add_argument("--provider", choices=["local", "openai"], default="local",
+                   help="local: Kokoro on this computer (default); openai: any OpenAI-compatible "
+                        "/v1/audio/speech server, e.g. Kokoro-FastAPI or a hosted TTS API")
+    e.add_argument("--model", choices=list(MODELS), default=DEFAULT_MODEL, help="local: Kokoro weights to use")
+    e.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"], help="local: where to run the model")
+    e.add_argument("--threads", type=int, default=0, help="local: PyTorch CPU threads (default: one per physical core)")
+    e.add_argument("--max-vram", type=float, default=0.0, metavar="GB", help="local, CUDA: cap PyTorch's GPU memory")
+    e.add_argument("--base-url", default=os.environ.get("OPENAI_BASE_URL", ""),
+                   help="openai: server URL, e.g. http://localhost:8880/v1 (default: $OPENAI_BASE_URL)")
+    e.add_argument("--api-model", default="kokoro", help="openai: model name the server expects (default: kokoro)")
+    e.add_argument("--api-key-env", default="OPENAI_API_KEY", metavar="VAR",
+                   help="openai: environment variable that holds the API key (default: OPENAI_API_KEY)")
+    e.add_argument("--concurrency", type=int, default=4, help="openai: parallel requests (default: 4)")
     args = p.parse_args(argv)
 
     if args.voices:
-        for code, name in LANGUAGES.items():
-            print(f"{code}  {name}")
-            for vid, label in VOICES[code]:
+        for code, voices in voices_for(args.model).items():
+            print(f"{code}  {LANGUAGES[code]}")
+            for vid, label in voices:
                 print(f"     {vid:14s} {label}")
         return 0
 
@@ -89,9 +104,16 @@ def main(argv=None):
         print("No chapters selected.", file=sys.stderr)
         return 2
 
-    voice = args.voice or default_voice(lang)
+    local = args.provider == "local"
+    if local and lang not in voices_for(args.model):
+        print(f"{MODELS[args.model][1]} cannot narrate {LANGUAGES[lang]}; use another --model.", file=sys.stderr)
+        return 2
+    voice = args.voice or default_voice(lang, args.model if local else DEFAULT_MODEL)
     out = args.output or str(Path(args.epub).with_suffix(".m4b"))
-    opts = ConvertOptions(output_path=out, voice=voice, lang=lang, speed=args.speed, device=args.device,
+    engine = EngineConfig(provider=args.provider, model=args.model, device=args.device, threads=args.threads,
+                          max_vram_gb=args.max_vram, base_url=args.base_url, api_model=args.api_model,
+                          api_key_env=args.api_key_env, concurrency=args.concurrency)
+    opts = ConvertOptions(output_path=out, voice=voice, lang=lang, speed=args.speed, engine=engine,
                           bitrate=args.bitrate, read_titles=not args.no_titles, read_credits=not args.no_credits,
                           keep_work_files=args.keep,
                           work_dir=args.work_dir)
@@ -111,6 +133,9 @@ def main(argv=None):
         return 130
     except CancelledError:
         return 130
+    except EngineError as e:
+        print(f"\nSpeech engine error: {e}", file=sys.stderr)
+        return 1
     print()
     return 0
 
