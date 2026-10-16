@@ -20,9 +20,15 @@ https://github.com/user-attachments/assets/d7159dc1-c76a-4f7b-99f8-bb99cad2c0a2
 
 - **Smart text extraction.** Reads the EPUB in reading order and skips what a human narrator would
   skip: cover, title and copyright pages, table of contents, index, glossary, bibliography, endnotes,
-  "also by" and ad pages. Inside the text it strips footnote/endnote markers, page numbers,
-  page-break anchors, figures, captions and repeated running headers. Every section is listed with its
+  "also by" and ad pages, and Project Gutenberg's header and licence. Inside the text it strips
+  footnote/endnote markers, page numbers, page-break anchors, figures, captions and repeated running
+  headers. Every section is listed with its
   detected type so you can tick or untick anything, and double-click to see exactly what will be read.
+- **Speech-friendly text** (on by default; a checkbox in the GUI, `--no-speech-friendly` on the
+  command line). Roman numerals that are surely numbers are read as numbers: chapter and part labels
+  ("Chapter V", "Act I, Scene V"), numerals the publisher tagged (Standard Ebooks), Bible references
+  ("Luke xiii. 3" as 13:3) and list labels ("(ii)"). Markdown leftovers and symbols that voices read
+  aloud (`#`, `**`, `* * *`, `====`) are removed. "I" stays the pronoun.
 - **Human-like continuity.** One consistent voice, sentence-aware chunking, and controlled pauses
   (short between sentences, longer between paragraphs, headings and scene breaks). Opening credits
   ("Title. Subtitle. Written by …", localized) and chapter titles are read like a professional
@@ -179,7 +185,7 @@ run at once instead of producing silence.
 | File | Purpose |
 |---|---|
 | `epub2audiobook/epub_parser.py` | EPUB → chapters/blocks; section classification; note/page-number/header stripping |
-| `epub2audiobook/textproc.py` | text normalisation (note markers, typography, roman numerals) and sentence-aware chunking |
+| `epub2audiobook/textproc.py` | text normalisation (note markers, typography, roman numerals, speech-friendly rewrites) and sentence-aware chunking |
 | `epub2audiobook/tts.py` | speech-engine interface and settings; local Kokoro engine (model, device, CPU threads, VRAM cap, per-language pipelines) |
 | `epub2audiobook/tts_openai.py` | engine for OpenAI-compatible TTS servers and OpenRouter (parallel requests, retries, MP3/WAV, resampling) |
 | `epub2audiobook/voices.py` | local models and their languages and voices |
@@ -190,7 +196,7 @@ run at once instead of producing silence.
 | `epub2audiobook/player.py` | built-in M4B test player (ffprobe/ffmpeg + sounddevice) |
 | `epub2audiobook/cli.py`, `app.py` | command-line interface and entry-point dispatcher |
 | `setup.ps1`, `run_gui.bat` | Windows setup and launcher |
-| `tests/` | pytest tests for the engines and the converter (`python -m pytest tests`) |
+| `tests/` | pytest tests for the engines, the converter, the parser and the text rules (`python -m pytest tests`) |
 
 ## Troubleshooting
 

@@ -52,6 +52,9 @@ def main(argv=None):
     p.add_argument("--bitrate", default="64k")
     p.add_argument("--no-titles", action="store_true", help="do not announce chapter titles")
     p.add_argument("--no-credits", action="store_true", help="skip the opening credits (title, subtitle, author)")
+    p.add_argument("--no-speech-friendly", action="store_true",
+                   help="read Roman numerals, markdown leftovers and symbols as written (default: rewrite them "
+                        "for speech, e.g. 'Chapter V' as 'Chapter 5')")
     p.add_argument("--keep", action="store_true", help="keep per-chapter WAV work files")
     p.add_argument("--work-dir")
     p.add_argument("--voices", action="store_true", help="list the voices of --model and exit")
@@ -134,7 +137,7 @@ def main(argv=None):
     engine = with_saved_key(engine)
     opts = ConvertOptions(output_path=out, voice=voice, lang=lang, speed=args.speed, engine=engine,
                           bitrate=args.bitrate, read_titles=not args.no_titles, read_credits=not args.no_credits,
-                          keep_work_files=args.keep,
+                          speech_friendly=not args.no_speech_friendly, keep_work_files=args.keep,
                           work_dir=args.work_dir)
 
     def on_progress(frac, msg):

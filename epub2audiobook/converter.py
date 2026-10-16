@@ -67,6 +67,7 @@ class ConvertOptions:
     max_chars: int = 350
     read_titles: bool = True
     read_credits: bool = True      # opening credits: title, subtitle, "written by <authors>"
+    speech_friendly: bool = True   # Roman numerals as digits, no markdown leftovers or symbols (textproc)
     keep_work_files: bool = False
     work_dir: Optional[str] = None
     encode_workers: int = 0        # 0 = auto (half the CPUs, 1..4)
@@ -249,7 +250,8 @@ class Converter:
         if ch is None:
             payload = "credits" + self.book.title + self.book.subtitle + self.book.author
         else:
-            payload = ch.title + "\x1e".join(b.kind + ":" + b.text for b in ch.blocks)
+            payload = ch.title + "\x1e".join(b.kind + ":" + b.text + (f"#{b.numerals}" if b.numerals else "")
+                                              for b in ch.blocks)
         return hashlib.sha1((opt.cache_key() + voice + opt.bitrate + payload).encode("utf-8")).hexdigest()[:12]
 
     def _encode_job(self, idx: int, title: str, wav: Path, m4a: Path, dur: float) -> None:
@@ -329,10 +331,10 @@ class Converter:
 
     def _synthesize_credits(self, voice: str) -> np.ndarray:
         """Opening credits like a professional audiobook: title, subtitle, 'written by' authors."""
-        lang = self.opt.lang
-        lines = [normalize_text(self.book.title, lang, is_heading=True)]
+        lang, sf = self.opt.lang, self.opt.speech_friendly
+        lines = [normalize_text(self.book.title, lang, is_heading=True, speech_friendly=sf)]
         if self.book.subtitle:
-            lines.append(normalize_text(self.book.subtitle, lang, is_heading=True))
+            lines.append(normalize_text(self.book.subtitle, lang, is_heading=True, speech_friendly=sf))
         if self.book.authors:
             lines.append(credits_author_line(self.book.authors, lang))
         steps = [(line, 1.0 if i < len(lines) - 1 else 1.8, 0) for i, line in enumerate(lines)]
@@ -347,12 +349,14 @@ class Converter:
         first_is_heading = bool(blocks) and blocks[0].kind == "heading"
         steps: list[Step] = []
         if opt.read_titles and not first_is_heading and ch.title:
-            steps.append((normalize_text(ch.title, opt.lang, is_heading=True), opt.pause_heading, len(ch.title)))
+            steps.append((normalize_text(ch.title, opt.lang, is_heading=True, speech_friendly=opt.speech_friendly),
+                          opt.pause_heading, len(ch.title)))
         for b in blocks:
             if b.kind == "break":
                 steps.append((None, opt.pause_break, 0))
                 continue
-            text = normalize_text(b.text, opt.lang, is_heading=(b.kind == "heading"))
+            text = normalize_text(b.text, opt.lang, is_heading=(b.kind == "heading"),
+                                  speech_friendly=opt.speech_friendly, numerals=b.numerals)
             if not text:
                 steps.append((None, 0.0, len(b.text)))
             elif b.kind == "heading":
@@ -386,11 +390,12 @@ def _duration_of(m4a: Path, wav: Path) -> float:
 
 
 def preview_audio(book_lang: str, voice: str, text: str, speed: float = 1.0, engine: Optional[TTSEngine] = None,
-                  max_chars: int = 350) -> np.ndarray:
+                  max_chars: int = 350, speech_friendly: bool = True) -> np.ndarray:
     """Synthesize a short sample (used by the GUI preview)."""
     engine = engine or create_engine(EngineConfig())
     parts: list[np.ndarray] = []
-    for chunk in chunk_paragraph(normalize_text(text, book_lang), book_lang, max_chars)[:3]:
+    for chunk in chunk_paragraph(normalize_text(text, book_lang, speech_friendly=speech_friendly), book_lang,
+                                 max_chars)[:3]:
         a = engine.synthesize(chunk, voice, book_lang, speed)
         if a.size:
             parts += [fade_edges(trim_silence(a)), silence(0.15)]
