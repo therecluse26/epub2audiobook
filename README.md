@@ -116,9 +116,10 @@ system install is needed.
    sends the text to any server with OpenAI's speech API, such as a local
    [Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI) or a hosted TTS service, several chunks
    at a time (**Parallel**). *OpenRouter* is the same with [OpenRouter](https://openrouter.ai)'s
-   settings filled in (Kokoro by default; any of its speech models by **Model name**). The API key is
-   read from the environment variable named in **API key var** and is never saved. Each server engine
-   remembers its own fields.
+   settings filled in (Kokoro by default; any of its speech models by **Model name**). Type the
+   **API key** (it is shown as dots), or leave it empty to use the environment variable named in
+   **Key env var**. Keys are saved in `%USERPROFILE%\.epub2audiobook-keys.json`, which only your account
+   can read, never in the settings file. Each server engine remembers its own fields and key.
 5. **Preview voice** plays a sample from the selected section.
 6. **Convert to M4B.** The status line shows progress and ETA, the *Status* column tracks each
    chapter (synthesizing → encoding → done), and the log shows details. *Cancel* keeps the finished
@@ -126,8 +127,8 @@ system install is needed.
 7. When finished, **Test in player** opens the M4B in the built-in player. Its *Checks* line confirms
    chapters, cover, tags and the Apple audiobook flag.
 
-Settings (voice per language, speed, bitrate, speech engine, …; never the API key) are remembered in
-`%USERPROFILE%\.epub2audiobook.json`.
+Settings (voice per language, speed, bitrate, speech engine, …) are remembered in
+`%USERPROFILE%\.epub2audiobook.json`. It never holds an API key, so you can share it safely.
 
 ## Getting the M4B onto an iPhone
 
@@ -162,7 +163,8 @@ Android: any audiobook player that reads M4B (Smart AudioBook Player, Voice, Lis
 
 With `--provider openai`, the text goes to any server with OpenAI's `POST /v1/audio/speech` API
 (`--api-model` names its model, e.g. `kokoro` or `tts-1`). The API key is read from `OPENAI_API_KEY`
-(or the variable named by `--api-key-env`), never from the command line. `--api-format` picks the
+(or the variable named by `--api-key-env`), never from the command line. If that variable is not set,
+the key saved in the GUI for the same engine is used. `--api-format` picks the
 audio the server sends: `wav` (default, lossless) or `mp3`.
 
 `--provider openrouter` uses the same API with OpenRouter's defaults: URL `https://openrouter.ai/api/v1`,
@@ -181,6 +183,7 @@ run at once instead of producing silence.
 | `epub2audiobook/tts.py` | speech-engine interface and settings; local Kokoro engine (model, device, CPU threads, VRAM cap, per-language pipelines) |
 | `epub2audiobook/tts_openai.py` | engine for OpenAI-compatible TTS servers and OpenRouter (parallel requests, retries, MP3/WAV, resampling) |
 | `epub2audiobook/voices.py` | local models and their languages and voices |
+| `epub2audiobook/keys.py` | API keys saved by the GUI (own file, owner-only permissions) |
 | `epub2audiobook/audio.py` | silence trimming/pauses/levelling, per-chapter AAC encoding, M4B mux with chapters/cover, Apple audiobook tagging |
 | `epub2audiobook/converter.py` | orchestration: credits, chapters, overlapped encoding, progress/cancel, per-chapter cache |
 | `epub2audiobook/gui.py` | wxPython application |

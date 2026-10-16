@@ -8,7 +8,7 @@ import logging
 import os
 import threading
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
@@ -68,7 +68,8 @@ class EngineConfig:
     max_vram_gb: float = 0.0             # local, CUDA: cap on PyTorch's GPU memory, 0 = no cap
     base_url: str = ""                   # server: e.g. http://localhost:8880/v1
     api_model: str = "kokoro"            # server: model name the server expects
-    api_key_env: str = "OPENAI_API_KEY"  # server: environment variable that holds the API key (never stored)
+    api_key_env: str = "OPENAI_API_KEY"  # server: environment variable that holds the API key
+    api_key: str = field(default="", repr=False)  # server: the key itself; empty = read api_key_env (keys.py)
     api_format: str = "wav"              # server: audio format to ask for, one of API_FORMATS
     concurrency: int = 4                 # server: parallel requests
 
@@ -93,7 +94,8 @@ class EngineConfig:
 def create_engine(cfg: EngineConfig) -> TTSEngine:
     if cfg.is_server:
         from .tts_openai import OpenAICompatibleEngine
-        return OpenAICompatibleEngine(cfg.base_url, cfg.api_model, os.environ.get(cfg.api_key_env, ""), cfg.concurrency,
+        key = cfg.api_key or os.environ.get(cfg.api_key_env, "")
+        return OpenAICompatibleEngine(cfg.base_url, cfg.api_model, key, cfg.concurrency,
                                       audio_format=cfg.api_format, api_key_env=cfg.api_key_env)
     if cfg.provider != "local":
         raise EngineError(f"Unknown speech engine provider: {cfg.provider!r}")

@@ -87,7 +87,8 @@ class OpenAICompatibleEngine(TTSEngine):
         """What to change, for the setup errors whose server message does not say it."""
         if code in (401, 403) and not self._api_key:
             var = f"${self._api_key_env}" if self._api_key_env else "the API key variable"
-            return f". No API key was sent: {var} is not set in the environment that started this program."
+            return (f". No API key was sent: {var} is not set in the environment that started this program, "
+                    f"and no key is saved (API key field in the GUI).")
         if code in (400, 422) and "response_format" in detail:
             other = "mp3" if self.audio_format == "wav" else "wav"
             return (f". The server does not send {self.audio_format} audio: set the audio format to {other} "

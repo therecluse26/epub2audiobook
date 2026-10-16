@@ -17,6 +17,7 @@ from . import __version__
 from .audio import find_ffmpeg, open_in_explorer, write_wav
 from .converter import CancelledError, ConvertOptions, Converter, preview_audio
 from .epub_parser import Book, Chapter, detect_language_from_text, load_book
+from .keys import KEYS_FILE, load_keys, save_keys
 from .player import PlayerFrame
 from .tts import API_FORMATS, SERVER_PRESETS, EngineConfig, EngineError, TTSEngine, create_engine, device_description
 from .voices import DEFAULT_MODEL, LANGUAGES, MODELS, default_voice, iso_to_kokoro, voices_for
@@ -221,8 +222,10 @@ class MainFrame(wx.Frame):
                                    **{k: v for k, v in s.get(f"server_{p}", {}).items() if v}}
                                for p, preset in SERVER_PRESETS.items()}
         self._server_provider: Optional[str] = None  # the provider whose values the server fields show
+        self._keys = load_keys()  # API keys by provider: kept in KEYS_FILE, never in the settings
         self.url_text = wx.TextCtrl(eb)
         self.api_model_text = wx.TextCtrl(eb)
+        self.key_text = wx.TextCtrl(eb, style=wx.TE_PASSWORD)
         self.key_env_text = wx.TextCtrl(eb)
         self.format_choice = wx.Choice(eb, choices=list(API_FORMATS))
         self.parallel_spin = wx.SpinCtrl(eb, min=1, max=64, initial=int(s.get("concurrency", 4)))
@@ -230,13 +233,15 @@ class MainFrame(wx.Frame):
                                                                "e.g. http://localhost:8880/v1 (Kokoro-FastAPI)"),
                              row("Model name:", self.api_model_text, "Model name the server expects, e.g. kokoro, "
                                                                      "tts-1 or hexgrad/kokoro-82m (OpenRouter)"),
-                             row("API key var:", self.key_env_text, "Environment variable that holds the API key. "
-                                                                    "The key itself is never saved."),
+                             row("API key:", self.key_text, f"Saved in {KEYS_FILE} (only you can read it), never "
+                                                            "in the settings file. Empty: the key env var is used."),
+                             row("Key env var:", self.key_env_text, "Name of an environment variable that holds the "
+                                                                    "key; used when the API key field is empty."),
                              row("Audio format:", self.format_choice, "Audio the server sends. wav is lossless; "
                                                                       "OpenRouter sends only mp3."),
                              row("Parallel:", self.parallel_spin, "Requests sent at the same time")]
         for c in (self.engine_choice, self.model_choice, self.device_choice, self.url_text, self.api_model_text,
-                  self.key_env_text, self.format_choice):
+                  self.key_text, self.key_env_text, self.format_choice):
             c.SetMinSize(d(wx.Size(120, -1)))
         eng_sz.Add(eg, 0, wx.EXPAND | wx.ALL, d(4))
         left.Add(eng_sz, 0, wx.EXPAND | wx.BOTTOM, d(8))
@@ -398,6 +403,7 @@ class MainFrame(wx.Frame):
                 "base_url": self.url_text.GetValue().strip(), "api_model": self.api_model_text.GetValue().strip(),
                 "api_key_env": self.key_env_text.GetValue().strip(),
                 "api_format": self.format_choice.GetStringSelection()}
+            self._keys[self._server_provider] = self.key_text.GetValue().strip()
 
     def _load_server_fields(self):
         """Show the selected server provider's values; keep what was typed for the previous one."""
@@ -408,6 +414,7 @@ class MainFrame(wx.Frame):
             self.url_text.ChangeValue(v["base_url"])
             self.api_model_text.ChangeValue(v["api_model"])
             self.key_env_text.ChangeValue(v["api_key_env"])
+            self.key_text.ChangeValue(self._keys.get(self._server_provider, ""))
             self.format_choice.SetSelection(API_FORMATS.index(v["api_format"]) if v["api_format"] in API_FORMATS else 0)
 
     def _show_engine_rows(self):
@@ -434,11 +441,13 @@ class MainFrame(wx.Frame):
         return EngineConfig.for_provider(self._provider(), base_url=self.url_text.GetValue().strip() or None,
                                          api_model=self.api_model_text.GetValue().strip() or None,
                                          api_key_env=self.key_env_text.GetValue().strip() or None,
+                                         api_key=self.key_text.GetValue().strip(),
                                          api_format=self.format_choice.GetStringSelection() or None,
                                          concurrency=self.parallel_spin.GetValue())
 
     def _engine_settings(self) -> dict:
-        """Speech engine settings to remember: each server provider's fields separately, never the API key."""
+        """Speech engine settings to remember: each server provider's fields separately, never the API key
+        (this also updates self._keys, which on_convert saves to KEYS_FILE)."""
         self._store_server_fields()
         return {"engine_provider": self._provider(), "model": self._local_model(), "device": self.current_device(),
                 "threads": self.threads_spin.GetValue(), "max_vram_gb": float(self.vram_spin.GetValue()),
@@ -495,8 +504,8 @@ class MainFrame(wx.Frame):
         for w in (self.epub_picker, self.out_picker, self.btn_convert, self.btn_preview, self.btn_all, self.btn_none,
                   self.btn_smart, self.lang_choice, self.voice_choice, self.speed, self.device_choice, self.bitrate_choice,
                   self.chk_titles, self.chk_credits, self.chk_keep, self.engine_choice, self.model_choice,
-                  self.threads_spin, self.vram_spin, self.url_text, self.api_model_text, self.key_env_text,
-                  self.format_choice, self.parallel_spin):
+                  self.threads_spin, self.vram_spin, self.url_text, self.api_model_text, self.key_text,
+                  self.key_env_text, self.format_choice, self.parallel_spin):
             w.Enable(not busy)
         self.btn_cancel.Enable(busy)
 
@@ -698,6 +707,10 @@ class MainFrame(wx.Frame):
                               "read_credits": opts.read_credits, "keep_work_files": opts.keep_work_files,
                               "last_out_dir": str(Path(out).parent), **self._engine_settings()})
         save_settings(self.settings)
+        try:
+            save_keys(self._keys)
+        except OSError as e:
+            self._log(f"Could not save the API key to {KEYS_FILE}: {e.strerror}")
         self._stop_preview()
         self.cancel_event.clear()
         self._busy(True)

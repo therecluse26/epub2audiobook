@@ -5,10 +5,12 @@ import argparse
 import os
 import sys
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 from .converter import CancelledError, ConvertOptions, Converter
 from .epub_parser import detect_language_from_text, load_book
+from .keys import load_keys
 from .tts import API_FORMATS, SERVER_PRESETS, EngineConfig, EngineError
 from .voices import DEFAULT_MODEL, LANGUAGES, MODELS, default_voice, iso_to_kokoro, voices_for
 
@@ -27,6 +29,13 @@ def parse_ranges(spec: str, n: int) -> list[int]:
         else:
             out.add(int(part))
     return sorted(i for i in out if 1 <= i <= n)
+
+
+def with_saved_key(cfg: EngineConfig) -> EngineConfig:
+    """Command line: the key environment variable wins; the key saved by the GUI is the fallback."""
+    if cfg.is_server and not cfg.api_key and not os.environ.get(cfg.api_key_env):
+        return replace(cfg, api_key=load_keys().get(cfg.provider, ""))
+    return cfg
 
 
 def main(argv=None):
@@ -60,7 +69,8 @@ def main(argv=None):
     e.add_argument("--api-model", help="server: model name the server expects "
                                        "(default: openai: kokoro; openrouter: hexgrad/kokoro-82m)")
     e.add_argument("--api-key-env", metavar="VAR", help="server: environment variable that holds the API key "
-                                                        "(default: OPENAI_API_KEY or OPENROUTER_API_KEY)")
+                                                        "(default: OPENAI_API_KEY or OPENROUTER_API_KEY); if it "
+                                                        "is not set, the key saved in the GUI is used")
     e.add_argument("--api-format", choices=API_FORMATS, help="server: audio format to ask for "
                                                             "(default: openai: wav; openrouter: mp3)")
     e.add_argument("--concurrency", type=int, default=4, help="server: parallel requests (default: 4)")
@@ -121,6 +131,7 @@ def main(argv=None):
                                        max_vram_gb=args.max_vram, base_url=base_url, api_model=args.api_model,
                                        api_key_env=args.api_key_env, api_format=args.api_format,
                                        concurrency=args.concurrency)
+    engine = with_saved_key(engine)
     opts = ConvertOptions(output_path=out, voice=voice, lang=lang, speed=args.speed, engine=engine,
                           bitrate=args.bitrate, read_titles=not args.no_titles, read_credits=not args.no_credits,
                           keep_work_files=args.keep,
