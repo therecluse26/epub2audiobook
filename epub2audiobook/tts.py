@@ -47,31 +47,54 @@ class TTSEngine:
         pass
 
 
+# Server providers and their defaults. All of them use the OpenAI speech API (tts_openai.py); a preset only
+# fills in the settings that the user does not give.
+SERVER_PRESETS = {
+    "openai": {"base_url": "", "api_model": "kokoro", "api_key_env": "OPENAI_API_KEY", "api_format": "wav"},
+    # OpenRouter sends only mp3 or pcm, and pcm does not tell the sample rate
+    "openrouter": {"base_url": "https://openrouter.ai/api/v1", "api_model": "hexgrad/kokoro-82m",
+                   "api_key_env": "OPENROUTER_API_KEY", "api_format": "mp3"},
+}
+API_FORMATS = ("wav", "mp3")
+
+
 @dataclass(frozen=True)
 class EngineConfig:
     """Which speech engine to use and how; the CLI and the GUI build one, create_engine() turns it into an engine."""
-    provider: str = "local"              # "local": Kokoro in this process; "openai": OpenAI-compatible server
+    provider: str = "local"              # "local": Kokoro in this process; a SERVER_PRESETS key: a TTS server
     model: str = DEFAULT_MODEL           # local: key of voices.MODELS
     device: str = "auto"                 # local: auto | cuda | cpu
     threads: int = 0                     # local: PyTorch CPU threads, 0 = PyTorch default (one per physical core)
     max_vram_gb: float = 0.0             # local, CUDA: cap on PyTorch's GPU memory, 0 = no cap
-    base_url: str = ""                   # openai: e.g. http://localhost:8880/v1
-    api_model: str = "kokoro"            # openai: model name the server expects
-    api_key_env: str = "OPENAI_API_KEY"  # openai: environment variable that holds the API key (never stored)
-    concurrency: int = 4                 # openai: parallel requests
+    base_url: str = ""                   # server: e.g. http://localhost:8880/v1
+    api_model: str = "kokoro"            # server: model name the server expects
+    api_key_env: str = "OPENAI_API_KEY"  # server: environment variable that holds the API key (never stored)
+    api_format: str = "wav"              # server: audio format to ask for, one of API_FORMATS
+    concurrency: int = 4                 # server: parallel requests
+
+    @classmethod
+    def for_provider(cls, provider: str, **settings) -> EngineConfig:
+        """Config for `provider`: the settings that are not None, the provider's preset for the others."""
+        given = {k: v for k, v in settings.items() if v is not None}
+        return cls(provider=provider, **{**SERVER_PRESETS.get(provider, {}), **given})
+
+    @property
+    def is_server(self) -> bool:
+        return self.provider in SERVER_PRESETS
 
     def audio_identity(self) -> str:
         """The settings that change the sound, for the chapter cache key ('' for the default local model, so
         caches made before engines were configurable stay valid)."""
-        if self.provider == "openai":
-            return f"openai|{self.base_url.rstrip('/')}|{self.api_model}"
+        if self.is_server:
+            return f"openai|{self.base_url.rstrip('/')}|{self.api_model}|{self.api_format}"
         return "" if self.model == DEFAULT_MODEL else self.model
 
 
 def create_engine(cfg: EngineConfig) -> TTSEngine:
-    if cfg.provider == "openai":
+    if cfg.is_server:
         from .tts_openai import OpenAICompatibleEngine
-        return OpenAICompatibleEngine(cfg.base_url, cfg.api_model, os.environ.get(cfg.api_key_env, ""), cfg.concurrency)
+        return OpenAICompatibleEngine(cfg.base_url, cfg.api_model, os.environ.get(cfg.api_key_env, ""), cfg.concurrency,
+                                      audio_format=cfg.api_format, api_key_env=cfg.api_key_env)
     if cfg.provider != "local":
         raise EngineError(f"Unknown speech engine provider: {cfg.provider!r}")
     if cfg.model not in MODELS:

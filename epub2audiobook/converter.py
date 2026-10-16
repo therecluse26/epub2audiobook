@@ -144,7 +144,7 @@ class Converter:
 
         self.total_chars = sum(ch.chars + len(ch.title) for ch in self.chapters)
         self.done_chars = 0
-        voice = opt.voice or default_voice(opt.lang, opt.engine.model if opt.engine.provider == "local" else DEFAULT_MODEL)
+        voice = opt.voice or default_voice(opt.lang, DEFAULT_MODEL if opt.engine.is_server else opt.engine.model)
         workers = opt.encode_workers or max(1, min(4, (os.cpu_count() or 2) // 2))
 
         self._log(f"Book: {self.book.title} — {self.book.author or 'unknown author'}")
@@ -153,7 +153,7 @@ class Converter:
         self._progress(0.0, "Loading speech engine…")
         self.engine.warm_up(opt.lang, voice)
         self._log(f"Speech engine: {self.engine.describe()}")
-        if opt.engine.provider != "local":
+        if opt.engine.is_server:
             self._log(f"About {self.total_chars:,} characters will be sent to the server (paid APIs bill per character)")
 
         # (index, title, m4a_path, duration) in playback order; futures fill in durations

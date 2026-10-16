@@ -115,8 +115,10 @@ system install is needed.
    and optionally the **CPU threads** and a **Max VRAM** cap (0 = defaults). *OpenAI-compatible server*
    sends the text to any server with OpenAI's speech API, such as a local
    [Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI) or a hosted TTS service, several chunks
-   at a time (**Parallel**). The API key is read from the environment variable named in **API key var**
-   and is never saved.
+   at a time (**Parallel**). *OpenRouter* is the same with [OpenRouter](https://openrouter.ai)'s
+   settings filled in (Kokoro by default; any of its speech models by **Model name**). The API key is
+   read from the environment variable named in **API key var** and is never saved. Each server engine
+   remembers its own fields.
 5. **Preview voice** plays a sample from the selected section.
 6. **Convert to M4B.** The status line shows progress and ETA, the *Status* column tracks each
    chapter (synthesizing → encoding → done), and the log shows details. *Cancel* keeps the finished
@@ -154,12 +156,19 @@ Android: any audiobook player that reads M4B (Smart AudioBook Player, Voice, Lis
 .venv\Scripts\python.exe -m epub2audiobook --fix-tags old.m4b         # add Apple audiobook atoms to an existing file
 .venv\Scripts\python.exe -m epub2audiobook book.epub --model kokoro-v1.1-zh --threads 6 --max-vram 2
 .venv\Scripts\python.exe -m epub2audiobook book.epub --provider openai --base-url http://localhost:8880/v1 --concurrency 8
+.venv\Scripts\python.exe -m epub2audiobook book.epub --provider openrouter --concurrency 8   # key in OPENROUTER_API_KEY
 .venv\Scripts\python.exe -m epub2audiobook book.epub --help
 ```
 
 With `--provider openai`, the text goes to any server with OpenAI's `POST /v1/audio/speech` API
 (`--api-model` names its model, e.g. `kokoro` or `tts-1`). The API key is read from `OPENAI_API_KEY`
-(or the variable named by `--api-key-env`), never from the command line. The log shows how many
+(or the variable named by `--api-key-env`), never from the command line. `--api-format` picks the
+audio the server sends: `wav` (default, lossless) or `mp3`.
+
+`--provider openrouter` uses the same API with OpenRouter's defaults: URL `https://openrouter.ai/api/v1`,
+model `hexgrad/kokoro-82m` (about $0.62 per million characters), key in `OPENROUTER_API_KEY`, and `mp3`
+(OpenRouter sends no WAV). Every default can be overridden, e.g. `--api-model google/gemini-3.8-flash-tts`;
+other models need their own voice names in `-v`. The log shows how many
 characters are sent, because paid APIs bill per character. A wrong URL, key, model or voice stops the
 run at once instead of producing silence.
 
@@ -170,7 +179,7 @@ run at once instead of producing silence.
 | `epub2audiobook/epub_parser.py` | EPUB → chapters/blocks; section classification; note/page-number/header stripping |
 | `epub2audiobook/textproc.py` | text normalisation (note markers, typography, roman numerals) and sentence-aware chunking |
 | `epub2audiobook/tts.py` | speech-engine interface and settings; local Kokoro engine (model, device, CPU threads, VRAM cap, per-language pipelines) |
-| `epub2audiobook/tts_openai.py` | engine for OpenAI-compatible TTS servers (parallel requests, retries, resampling) |
+| `epub2audiobook/tts_openai.py` | engine for OpenAI-compatible TTS servers and OpenRouter (parallel requests, retries, MP3/WAV, resampling) |
 | `epub2audiobook/voices.py` | local models and their languages and voices |
 | `epub2audiobook/audio.py` | silence trimming/pauses/levelling, per-chapter AAC encoding, M4B mux with chapters/cover, Apple audiobook tagging |
 | `epub2audiobook/converter.py` | orchestration: credits, chapters, overlapped encoding, progress/cancel, per-chapter cache |

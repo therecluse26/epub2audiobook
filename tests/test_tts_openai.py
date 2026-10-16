@@ -9,29 +9,40 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from epub2audiobook.tts import EngineConfig, EngineError, create_engine
+from epub2audiobook.tts import SERVER_PRESETS, EngineConfig, EngineError, create_engine
 from epub2audiobook.tts_openai import OpenAICompatibleEngine, resample
 
 
-def wav_bytes(sr, seconds=0.5, freq=220.0):
+def audio_bytes(sr, fmt="wav", seconds=0.5, freq=220.0):
     t = np.arange(int(sr * seconds)) / sr
     buf = io.BytesIO()
-    sf.write(buf, (0.3 * np.sin(2 * np.pi * freq * t)).astype(np.float32), sr, format="WAV", subtype="PCM_16")
+    tone = (0.3 * np.sin(2 * np.pi * freq * t)).astype(np.float32)
+    sf.write(buf, tone, sr, format="WAV", subtype="PCM_16") if fmt == "wav" else sf.write(buf, tone, sr, format="MP3")
     return buf.getvalue()
+
+
+# OpenRouter's answer to response_format "wav" (2026-10)
+ZOD_FORMAT_ERROR = {"success": False, "error": {"name": "ZodError", "message": json.dumps(
+    [{"code": "invalid_value", "values": ["mp3", "pcm"], "path": ["response_format"],
+      "message": 'Invalid option: expected one of "mp3"|"pcm"'}], indent=2)}}
 
 
 @pytest.fixture
 def server():
-    """state["script"]: HTTP statuses to answer, in order (then 200); state["requests"]: what was received."""
-    state = {"script": [], "requests": [], "sr": 24000}
+    """state["script"]: HTTP statuses to answer, in order (then 200); state["requests"]: what was received;
+    state["formats"]: the response formats the server accepts."""
+    state = {"script": [], "requests": [], "sr": 24000, "formats": {"wav", "mp3"}}
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             state["requests"].append((self.path, dict(self.headers), body))
             status = state["script"].pop(0) if state["script"] else 200
-            if status == 200:
-                data, ctype = wav_bytes(state["sr"]), "audio/wav"
+            fmt = body.get("response_format")
+            if status == 200 and fmt not in state["formats"]:
+                status, data, ctype = 400, json.dumps(ZOD_FORMAT_ERROR).encode(), "application/json"
+            elif status == 200:
+                data, ctype = audio_bytes(state["sr"], fmt), f"audio/{fmt}"
             else:
                 data, ctype = json.dumps({"error": {"message": f"fake error {status}"}}).encode(), "application/json"
             self.send_response(status)
@@ -66,6 +77,40 @@ def test_sends_a_standard_openai_request_and_decodes_the_wav(server):
     assert body == {"model": "kokoro", "input": "Hello there.", "voice": "af_heart", "speed": 1.1,
                     "response_format": "wav"}
     assert headers["Authorization"] == "Bearer sk-test"
+
+
+def test_default_speed_is_not_sent(server):
+    engine(server["url"]).synthesize("Hi.", "af_heart", "a", 1.0)
+    assert "speed" not in server["requests"][0][2]
+
+
+def test_mp3_is_requested_and_decoded(server):
+    audio = engine(server["url"], audio_format="mp3").synthesize("Hi.", "af_heart", "a")
+    assert server["requests"][0][2]["response_format"] == "mp3"
+    assert abs(audio.size - 12000) < 600  # mp3 frames may pad the end a little
+    peak_hz = np.argmax(np.abs(np.fft.rfft(audio))) * 24000 / audio.size
+    assert abs(peak_hz - 220) < 5
+
+
+def test_rejected_format_names_the_setting_to_change(server):
+    server["formats"] = {"mp3"}
+    with pytest.raises(EngineError, match="does not send wav audio: set the audio format to mp3") as err:
+        engine(server["url"]).synthesize("Hi.", "af_heart", "a")
+    assert "\n" not in str(err.value)  # the pretty-printed JSON message is flattened
+    assert len(server["requests"]) == 1
+
+
+def test_missing_key_is_named_in_the_error(server):
+    server["script"] = [401]
+    with pytest.raises(EngineError, match=r"No API key was sent: \$OPENROUTER_API_KEY is not set"):
+        engine(server["url"], api_key_env="OPENROUTER_API_KEY").synthesize("Hi.", "af_heart", "a")
+
+
+def test_wrong_key_has_no_missing_key_hint(server):
+    server["script"] = [401]
+    with pytest.raises(EngineError) as err:
+        engine(server["url"], api_key="sk-wrong", api_key_env="OPENROUTER_API_KEY").synthesize("Hi.", "af_heart", "a")
+    assert "No API key was sent" not in str(err.value)
 
 
 def test_no_api_key_means_no_authorization_header(server):
@@ -129,3 +174,20 @@ def test_api_key_comes_from_the_named_environment_variable(server, monkeypatch):
     create_engine(EngineConfig(provider="openai", base_url=server["url"], api_key_env="MY_TTS_KEY")) \
         .synthesize("Hi.", "af_heart", "a")
     assert server["requests"][0][1]["Authorization"] == "Bearer sk-env"
+
+
+def test_openrouter_preset_fills_only_what_is_not_given():
+    cfg = EngineConfig.for_provider("openrouter", base_url=None, api_model=None, api_key_env=None, api_format=None)
+    assert (cfg.base_url, cfg.api_model, cfg.api_key_env, cfg.api_format) == (
+        "https://openrouter.ai/api/v1", "hexgrad/kokoro-82m", "OPENROUTER_API_KEY", "mp3")
+    cfg = EngineConfig.for_provider("openrouter", api_model="google/gemini-3.8-flash-tts", concurrency=16)
+    assert cfg.api_model == "google/gemini-3.8-flash-tts" and cfg.concurrency == 16 and cfg.api_format == "mp3"
+    assert EngineConfig.for_provider("local", base_url=None).is_server is False
+
+
+def test_every_server_provider_creates_the_openai_engine(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or")
+    eng = create_engine(EngineConfig.for_provider("openrouter"))
+    assert isinstance(eng, OpenAICompatibleEngine)
+    assert (eng.base_url, eng.model, eng.audio_format) == ("https://openrouter.ai/api/v1", "hexgrad/kokoro-82m", "mp3")
+    assert set(SERVER_PRESETS) == {"openai", "openrouter"}

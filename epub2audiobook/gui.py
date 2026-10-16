@@ -18,13 +18,14 @@ from .audio import find_ffmpeg, open_in_explorer, write_wav
 from .converter import CancelledError, ConvertOptions, Converter, preview_audio
 from .epub_parser import Book, Chapter, detect_language_from_text, load_book
 from .player import PlayerFrame
-from .tts import EngineConfig, EngineError, TTSEngine, create_engine, device_description
+from .tts import API_FORMATS, SERVER_PRESETS, EngineConfig, EngineError, TTSEngine, create_engine, device_description
 from .voices import DEFAULT_MODEL, LANGUAGES, MODELS, default_voice, iso_to_kokoro, voices_for
 
 SETTINGS_FILE = Path.home() / ".epub2audiobook.json"
 WORDS_PER_MIN = 155  # Kokoro at speed 1.0, roughly
 LEFT_COL_DIP = 300   # width of the left (book + narration) column in DIP
 
+PROVIDER_LABELS = {"local": "Local (Kokoro)", "openai": "OpenAI-compatible server", "openrouter": "OpenRouter"}
 STATUS_TEXT = {"synth": "synthesizing…", "encode": "encoding…", "done": "✓ done", "cached": "✓ cached"}
 
 
@@ -197,8 +198,10 @@ class MainFrame(wx.Frame):
                 ctrl.SetToolTip(tip)
             return lbl, ctrl
 
-        self.engine_choice = wx.Choice(eb, choices=["Local (Kokoro)", "OpenAI-compatible server"])
-        self.engine_choice.SetSelection(1 if s.get("engine_provider") == "openai" else 0)
+        self._providers = list(PROVIDER_LABELS)
+        self.engine_choice = wx.Choice(eb, choices=list(PROVIDER_LABELS.values()))
+        self.engine_choice.SetSelection(self._providers.index(s["engine_provider"])
+                                        if s.get("engine_provider") in PROVIDER_LABELS else 0)
         row("Engine:", self.engine_choice)
         self._model_keys = list(MODELS)
         self.model_choice = wx.Choice(eb, choices=[label for _, label in MODELS.values()])
@@ -213,19 +216,27 @@ class MainFrame(wx.Frame):
                             row("Device:", self.device_choice),
                             row("CPU threads:", self.threads_spin, "0 = PyTorch default (one per physical core)"),
                             row("Max VRAM (GB):", self.vram_spin, "Cap on PyTorch's GPU memory (CUDA only). 0 = no cap")]
-        self.url_text = wx.TextCtrl(eb, value=s.get("base_url", "http://localhost:8880/v1"))
-        self.api_model_text = wx.TextCtrl(eb, value=s.get("api_model", "kokoro"))
-        self.key_env_text = wx.TextCtrl(eb, value=s.get("api_key_env", "OPENAI_API_KEY"))
+        # each server provider keeps its own fields; its preset fills the empty ones
+        self._server_values = {p: {**preset, "base_url": preset["base_url"] or "http://localhost:8880/v1",
+                                   **{k: v for k, v in s.get(f"server_{p}", {}).items() if v}}
+                               for p, preset in SERVER_PRESETS.items()}
+        self._server_provider: Optional[str] = None  # the provider whose values the server fields show
+        self.url_text = wx.TextCtrl(eb)
+        self.api_model_text = wx.TextCtrl(eb)
+        self.key_env_text = wx.TextCtrl(eb)
+        self.format_choice = wx.Choice(eb, choices=list(API_FORMATS))
         self.parallel_spin = wx.SpinCtrl(eb, min=1, max=64, initial=int(s.get("concurrency", 4)))
         self._server_rows = [row("Server URL:", self.url_text, "Base URL of an OpenAI-compatible TTS server, "
                                                                "e.g. http://localhost:8880/v1 (Kokoro-FastAPI)"),
-                             row("Model name:", self.api_model_text, "Model name the server expects, e.g. kokoro "
-                                                                     "or tts-1"),
+                             row("Model name:", self.api_model_text, "Model name the server expects, e.g. kokoro, "
+                                                                     "tts-1 or hexgrad/kokoro-82m (OpenRouter)"),
                              row("API key var:", self.key_env_text, "Environment variable that holds the API key. "
                                                                     "The key itself is never saved."),
+                             row("Audio format:", self.format_choice, "Audio the server sends. wav is lossless; "
+                                                                      "OpenRouter sends only mp3."),
                              row("Parallel:", self.parallel_spin, "Requests sent at the same time")]
         for c in (self.engine_choice, self.model_choice, self.device_choice, self.url_text, self.api_model_text,
-                  self.key_env_text):
+                  self.key_env_text, self.format_choice):
             c.SetMinSize(d(wx.Size(120, -1)))
         eng_sz.Add(eg, 0, wx.EXPAND | wx.ALL, d(4))
         left.Add(eng_sz, 0, wx.EXPAND | wx.BOTTOM, d(8))
@@ -296,6 +307,7 @@ class MainFrame(wx.Frame):
         self.engine_choice.Bind(wx.EVT_CHOICE, lambda e: self._on_engine_changed())
         self.model_choice.Bind(wx.EVT_CHOICE, lambda e: self._on_engine_changed())
 
+        self._load_server_fields()
         self._show_engine_rows()
         self._fill_langs(self.settings.get("lang", "a"), voice=self.settings.get("voice"))
 
@@ -367,12 +379,36 @@ class MainFrame(wx.Frame):
     def current_device(self) -> str:
         return ["auto", "cuda", "cpu"][max(0, self.device_choice.GetSelection())]
 
+    def _provider(self) -> str:
+        return self._providers[max(0, self.engine_choice.GetSelection())]
+
     def _is_server(self) -> bool:
-        return self.engine_choice.GetSelection() == 1
+        return self._provider() in SERVER_PRESETS
+
+    def _local_model(self) -> str:
+        return self._model_keys[max(0, self.model_choice.GetSelection())]
 
     def _voice_model(self) -> str:
         """Model whose voices and languages apply: the local model, or Kokoro v1.0 for a server (Kokoro-FastAPI)."""
-        return DEFAULT_MODEL if self._is_server() else self._model_keys[max(0, self.model_choice.GetSelection())]
+        return DEFAULT_MODEL if self._is_server() else self._local_model()
+
+    def _store_server_fields(self):
+        if self._server_provider:
+            self._server_values[self._server_provider] = {
+                "base_url": self.url_text.GetValue().strip(), "api_model": self.api_model_text.GetValue().strip(),
+                "api_key_env": self.key_env_text.GetValue().strip(),
+                "api_format": self.format_choice.GetStringSelection()}
+
+    def _load_server_fields(self):
+        """Show the selected server provider's values; keep what was typed for the previous one."""
+        self._store_server_fields()
+        self._server_provider = self._provider() if self._is_server() else None
+        if self._server_provider:
+            v = self._server_values[self._server_provider]
+            self.url_text.ChangeValue(v["base_url"])
+            self.api_model_text.ChangeValue(v["api_model"])
+            self.key_env_text.ChangeValue(v["api_key_env"])
+            self.format_choice.SetSelection(API_FORMATS.index(v["api_format"]) if v["api_format"] in API_FORMATS else 0)
 
     def _show_engine_rows(self):
         for rows, show in ((self._local_rows, not self._is_server()), (self._server_rows, self._is_server())):
@@ -383,6 +419,7 @@ class MainFrame(wx.Frame):
         self.left.FitInside()
 
     def _on_engine_changed(self):
+        self._load_server_fields()
         self._show_engine_rows()
         self._fill_langs()
 
@@ -390,12 +427,23 @@ class MainFrame(wx.Frame):
         self._fill_voices(self.current_lang(), self.settings.get(f"voice_{self.current_lang()}"))
 
     def current_engine_config(self) -> EngineConfig:
-        return EngineConfig(provider="openai" if self._is_server() else "local", model=self._voice_model(),
-                            device=self.current_device(), threads=self.threads_spin.GetValue(),
-                            max_vram_gb=float(self.vram_spin.GetValue()), base_url=self.url_text.GetValue().strip(),
-                            api_model=self.api_model_text.GetValue().strip() or "kokoro",
-                            api_key_env=self.key_env_text.GetValue().strip() or "OPENAI_API_KEY",
-                            concurrency=self.parallel_spin.GetValue())
+        if not self._is_server():
+            return EngineConfig(model=self._local_model(), device=self.current_device(),
+                                threads=self.threads_spin.GetValue(), max_vram_gb=float(self.vram_spin.GetValue()))
+        # an empty field means the provider's default
+        return EngineConfig.for_provider(self._provider(), base_url=self.url_text.GetValue().strip() or None,
+                                         api_model=self.api_model_text.GetValue().strip() or None,
+                                         api_key_env=self.key_env_text.GetValue().strip() or None,
+                                         api_format=self.format_choice.GetStringSelection() or None,
+                                         concurrency=self.parallel_spin.GetValue())
+
+    def _engine_settings(self) -> dict:
+        """Speech engine settings to remember: each server provider's fields separately, never the API key."""
+        self._store_server_fields()
+        return {"engine_provider": self._provider(), "model": self._local_model(), "device": self.current_device(),
+                "threads": self.threads_spin.GetValue(), "max_vram_gb": float(self.vram_spin.GetValue()),
+                "concurrency": self.parallel_spin.GetValue(),
+                **{f"server_{p}": dict(v) for p, v in self._server_values.items()}}
 
     def _get_engine(self) -> TTSEngine:
         """The engine for the current settings (call from the GUI thread); rebuilt only when a setting changed."""
@@ -448,7 +496,7 @@ class MainFrame(wx.Frame):
                   self.btn_smart, self.lang_choice, self.voice_choice, self.speed, self.device_choice, self.bitrate_choice,
                   self.chk_titles, self.chk_credits, self.chk_keep, self.engine_choice, self.model_choice,
                   self.threads_spin, self.vram_spin, self.url_text, self.api_model_text, self.key_env_text,
-                  self.parallel_spin):
+                  self.format_choice, self.parallel_spin):
             w.Enable(not busy)
         self.btn_cancel.Enable(busy)
 
@@ -648,11 +696,7 @@ class MainFrame(wx.Frame):
         self.settings.update({"lang": lang, "voice": opts.voice, f"voice_{lang}": opts.voice, "speed": opts.speed,
                               "bitrate": opts.bitrate, "read_titles": opts.read_titles,
                               "read_credits": opts.read_credits, "keep_work_files": opts.keep_work_files,
-                              "last_out_dir": str(Path(out).parent),
-                              "engine_provider": cfg.provider, "model": cfg.model, "device": cfg.device,
-                              "threads": cfg.threads, "max_vram_gb": cfg.max_vram_gb, "base_url": cfg.base_url,
-                              "api_model": cfg.api_model, "api_key_env": cfg.api_key_env,
-                              "concurrency": cfg.concurrency})
+                              "last_out_dir": str(Path(out).parent), **self._engine_settings()})
         save_settings(self.settings)
         self._stop_preview()
         self.cancel_event.clear()

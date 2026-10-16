@@ -92,3 +92,6 @@ def test_cache_key_changes_only_with_settings_that_change_the_sound():
     assert server != default
     assert key(provider="openai", base_url="http://localhost:8880/v1/", concurrency=16) == server
     assert key(provider="openai", base_url="http://localhost:8880/v1", api_model="tts-1") != server
+    assert key(provider="openai", base_url="http://localhost:8880/v1", api_format="mp3") != server
+    # the same server, model and format sound the same, whichever provider preset was used
+    assert key(provider="openrouter", base_url="http://localhost:8880/v1", api_model="kokoro") == server

@@ -1,6 +1,6 @@
 """Speech from any server that implements OpenAI's POST /v1/audio/speech: a local Kokoro-FastAPI, OpenAI itself,
-or a hosted Kokoro API. The converter sends up to `concurrency` chunks at once, so a fast server narrates a book
-in minutes. Only the standard request fields are sent (model, input, voice, speed, response_format).
+OpenRouter, or a hosted Kokoro API. The converter sends up to `concurrency` chunks at once, so a fast server
+narrates a book in minutes. Only the standard request fields are sent (model, input, voice, speed, response_format).
 """
 from __future__ import annotations
 
@@ -23,20 +23,23 @@ RETRY_HTTP = {408, 409, 425, 429, 500, 502, 503, 504}  # busy or temporarily bro
 
 class OpenAICompatibleEngine(TTSEngine):
     def __init__(self, base_url: str, model: str = "kokoro", api_key: str = "", concurrency: int = 4,
-                 timeout: float = 120.0, retries: int = 5, backoff: float = 1.0):
+                 timeout: float = 120.0, retries: int = 5, backoff: float = 1.0, audio_format: str = "wav",
+                 api_key_env: str = ""):
         if not base_url:
             raise EngineError("No server URL, e.g. http://localhost:8880/v1. Set it in the GUI (Server URL) "
                               "or on the command line (--base-url or $OPENAI_BASE_URL).")
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.max_parallel = max(1, int(concurrency))
+        self.audio_format = audio_format  # wav or mp3: both carry their sample rate (raw pcm does not)
         self._api_key = api_key
+        self._api_key_env = api_key_env  # only to name it in error messages
         self._timeout = timeout
         self._retries = retries
         self._backoff = backoff  # seconds before the first retry; doubles each time
 
     def describe(self) -> str:
-        return f"'{self.model}' at {self.base_url} ({self.max_parallel} parallel requests)"
+        return f"'{self.model}' at {self.base_url} ({self.audio_format}, {self.max_parallel} parallel requests)"
 
     def warm_up(self, lang: str, voice: str) -> None:
         # one tiny request, so a wrong URL, key, model or voice fails now and not at chapter 1
@@ -46,8 +49,10 @@ class OpenAICompatibleEngine(TTSEngine):
         text = text.strip()
         if not text:
             return np.zeros(0, dtype=np.float32)
-        body = json.dumps({"model": self.model, "input": text, "voice": voice, "speed": speed,
-                           "response_format": "wav"}).encode("utf-8")
+        request = {"model": self.model, "input": text, "voice": voice, "response_format": self.audio_format}
+        if speed != 1.0:  # 1.0 is the API default; some models have no speed control and reject the field
+            request["speed"] = speed
+        body = json.dumps(request).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -62,7 +67,7 @@ class OpenAICompatibleEngine(TTSEngine):
             except urllib.error.HTTPError as e:
                 detail = _error_detail(e)
                 if e.code not in RETRY_HTTP:
-                    raise EngineError(f"{url} answered HTTP {e.code}: {detail}") from None
+                    raise EngineError(f"{url} answered HTTP {e.code}: {detail}{self._hint(e.code, detail)}") from None
                 if last:  # the server keeps failing on this text: let the converter retry smaller pieces
                     raise RuntimeError(f"{url} answered HTTP {e.code} {self._retries + 1} times: {detail}") from None
                 wait = _retry_after(e)
@@ -77,6 +82,17 @@ class OpenAICompatibleEngine(TTSEngine):
                 wait = None
             time.sleep(wait if wait is not None else self._backoff * 2 ** attempt * (0.5 + random.random()))
         raise AssertionError("unreachable")
+
+    def _hint(self, code: int, detail: str) -> str:
+        """What to change, for the setup errors whose server message does not say it."""
+        if code in (401, 403) and not self._api_key:
+            var = f"${self._api_key_env}" if self._api_key_env else "the API key variable"
+            return f". No API key was sent: {var} is not set in the environment that started this program."
+        if code in (400, 422) and "response_format" in detail:
+            other = "mp3" if self.audio_format == "wav" else "wav"
+            return (f". The server does not send {self.audio_format} audio: set the audio format to {other} "
+                    f"(--api-format {other}, or Audio format in the GUI).")
+        return ""
 
 
 def _decode(raw: bytes) -> np.ndarray:
@@ -109,7 +125,7 @@ def _error_detail(e: urllib.error.HTTPError) -> str:
         if isinstance(err, dict) and key in err:
             err = err[key]
     msg = err.get("message", err) if isinstance(err, dict) else err
-    return str(msg)[:300]
+    return " ".join(str(msg).split())[:300]  # some servers send pretty-printed JSON as the message
 
 
 def _retry_after(e: urllib.error.HTTPError) -> Optional[float]:

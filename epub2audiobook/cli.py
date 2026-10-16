@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .converter import CancelledError, ConvertOptions, Converter
 from .epub_parser import detect_language_from_text, load_book
-from .tts import EngineConfig, EngineError
+from .tts import API_FORMATS, SERVER_PRESETS, EngineConfig, EngineError
 from .voices import DEFAULT_MODEL, LANGUAGES, MODELS, default_voice, iso_to_kokoro, voices_for
 
 
@@ -47,19 +47,23 @@ def main(argv=None):
     p.add_argument("--work-dir")
     p.add_argument("--voices", action="store_true", help="list the voices of --model and exit")
     e = p.add_argument_group("speech engine")
-    e.add_argument("--provider", choices=["local", "openai"], default="local",
+    e.add_argument("--provider", choices=["local", *SERVER_PRESETS], default="local",
                    help="local: Kokoro on this computer (default); openai: any OpenAI-compatible "
-                        "/v1/audio/speech server, e.g. Kokoro-FastAPI or a hosted TTS API")
+                        "/v1/audio/speech server, e.g. Kokoro-FastAPI or a hosted TTS API; openrouter: "
+                        "OpenRouter's speech models (Kokoro by default), key in $OPENROUTER_API_KEY")
     e.add_argument("--model", choices=list(MODELS), default=DEFAULT_MODEL, help="local: Kokoro weights to use")
     e.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"], help="local: where to run the model")
     e.add_argument("--threads", type=int, default=0, help="local: PyTorch CPU threads (default: one per physical core)")
     e.add_argument("--max-vram", type=float, default=0.0, metavar="GB", help="local, CUDA: cap PyTorch's GPU memory")
-    e.add_argument("--base-url", default=os.environ.get("OPENAI_BASE_URL", ""),
-                   help="openai: server URL, e.g. http://localhost:8880/v1 (default: $OPENAI_BASE_URL)")
-    e.add_argument("--api-model", default="kokoro", help="openai: model name the server expects (default: kokoro)")
-    e.add_argument("--api-key-env", default="OPENAI_API_KEY", metavar="VAR",
-                   help="openai: environment variable that holds the API key (default: OPENAI_API_KEY)")
-    e.add_argument("--concurrency", type=int, default=4, help="openai: parallel requests (default: 4)")
+    e.add_argument("--base-url", help="server URL, e.g. http://localhost:8880/v1 "
+                                      "(default: openai: $OPENAI_BASE_URL; openrouter: https://openrouter.ai/api/v1)")
+    e.add_argument("--api-model", help="server: model name the server expects "
+                                       "(default: openai: kokoro; openrouter: hexgrad/kokoro-82m)")
+    e.add_argument("--api-key-env", metavar="VAR", help="server: environment variable that holds the API key "
+                                                        "(default: OPENAI_API_KEY or OPENROUTER_API_KEY)")
+    e.add_argument("--api-format", choices=API_FORMATS, help="server: audio format to ask for "
+                                                            "(default: openai: wav; openrouter: mp3)")
+    e.add_argument("--concurrency", type=int, default=4, help="server: parallel requests (default: 4)")
     args = p.parse_args(argv)
 
     if args.voices:
@@ -110,9 +114,13 @@ def main(argv=None):
         return 2
     voice = args.voice or default_voice(lang, args.model if local else DEFAULT_MODEL)
     out = args.output or str(Path(args.epub).with_suffix(".m4b"))
-    engine = EngineConfig(provider=args.provider, model=args.model, device=args.device, threads=args.threads,
-                          max_vram_gb=args.max_vram, base_url=args.base_url, api_model=args.api_model,
-                          api_key_env=args.api_key_env, concurrency=args.concurrency)
+    base_url = args.base_url
+    if base_url is None and args.provider == "openai":
+        base_url = os.environ.get("OPENAI_BASE_URL", "")
+    engine = EngineConfig.for_provider(args.provider, model=args.model, device=args.device, threads=args.threads,
+                                       max_vram_gb=args.max_vram, base_url=base_url, api_model=args.api_model,
+                                       api_key_env=args.api_key_env, api_format=args.api_format,
+                                       concurrency=args.concurrency)
     opts = ConvertOptions(output_path=out, voice=voice, lang=lang, speed=args.speed, engine=engine,
                           bitrate=args.bitrate, read_titles=not args.no_titles, read_credits=not args.no_credits,
                           keep_work_files=args.keep,
