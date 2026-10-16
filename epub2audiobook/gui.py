@@ -173,9 +173,14 @@ class MainFrame(wx.Frame):
         self.chk_credits.SetValue(self.settings.get("read_credits", True))
         self.chk_titles = wx.CheckBox(sb, label="Announce chapter titles")
         self.chk_titles.SetValue(self.settings.get("read_titles", True))
+        self.chk_speech = wx.CheckBox(sb, label="Speech-friendly numbers and symbols")
+        self.chk_speech.SetValue(self.settings.get("speech_friendly", True))
+        self.chk_speech.SetToolTip("Reads Roman numerals in chapter labels and references as numbers "
+                                   "(\"Chapter V\" as \"Chapter 5\", \"Luke xiii. 3\" as \"Luke 13:3\") "
+                                   "and drops markdown leftovers and symbols that voices read aloud (#, **, ===).")
         self.chk_keep = wx.CheckBox(sb, label="Keep per-chapter work files (resume)")
         self.chk_keep.SetValue(self.settings.get("keep_work_files", False))
-        for c in (self.chk_credits, self.chk_titles, self.chk_keep):
+        for c in (self.chk_credits, self.chk_titles, self.chk_speech, self.chk_keep):
             set_sz.Add(c, 0, wx.LEFT | wx.RIGHT | wx.TOP, d(4))
         prow = wx.BoxSizer(wx.HORIZONTAL)
         self.btn_preview = wx.Button(sb, label="▶ Preview voice")
@@ -614,6 +619,7 @@ class MainFrame(wx.Frame):
         if not text:
             text = "This is a preview of the selected voice, reading a short sample so you can judge its tone and pacing."
         lang, voice, speed = self.current_lang(), self.current_voice(), float(self.speed.GetValue())
+        speech_friendly = self.chk_speech.GetValue()
         try:
             engine = self._get_engine()
         except EngineError as e:
@@ -626,7 +632,7 @@ class MainFrame(wx.Frame):
 
         def work():
             try:
-                audio = preview_audio(lang, voice, text, speed, engine)
+                audio = preview_audio(lang, voice, text, speed, engine, speech_friendly=speech_friendly)
                 tmp = Path(tempfile.gettempdir()) / "epub2audiobook_preview.wav"
                 write_wav(tmp, audio)
                 wx.CallAfter(self._play_preview, tmp)
@@ -701,10 +707,11 @@ class MainFrame(wx.Frame):
         opts = ConvertOptions(output_path=out, voice=self.current_voice(), lang=lang, speed=float(self.speed.GetValue()),
                               engine=cfg, bitrate=self.bitrate_choice.GetStringSelection() or "64k",
                               read_titles=self.chk_titles.GetValue(), read_credits=self.chk_credits.GetValue(),
-                              keep_work_files=self.chk_keep.GetValue())
+                              speech_friendly=self.chk_speech.GetValue(), keep_work_files=self.chk_keep.GetValue())
         self.settings.update({"lang": lang, "voice": opts.voice, f"voice_{lang}": opts.voice, "speed": opts.speed,
                               "bitrate": opts.bitrate, "read_titles": opts.read_titles,
-                              "read_credits": opts.read_credits, "keep_work_files": opts.keep_work_files,
+                              "read_credits": opts.read_credits, "speech_friendly": opts.speech_friendly,
+                              "keep_work_files": opts.keep_work_files,
                               "last_out_dir": str(Path(out).parent), **self._engine_settings()})
         save_settings(self.settings)
         try:

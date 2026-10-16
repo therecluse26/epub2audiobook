@@ -83,9 +83,25 @@ def test_other_errors_are_still_retried_in_smaller_pieces():
     assert any(len(t) < 40 for t in engine.calls)  # it split down to the minimum size
 
 
+def test_marked_numerals_reach_the_engine_as_digits_only_with_the_option():
+    blocks = [Block("heading", "V. Anxious Days", 1, [(0, 1)]), Block("para", "King Renard IV shook his head.", 0, [(12, 14)])]
+    ch = Chapter(index=1, href="c1.xhtml", title="V: Anxious Days", kind="chapter", blocks=blocks)
+    book = Book(path="t.epub", title="T", authors=["A"], language_iso="en", kokoro_lang="a", year=None,
+                cover_bytes=None, cover_ext="", chapters=[ch])
+    sent = {}
+    for on in (True, False):
+        engine = FakeEngine()
+        Converter(book, [ch], ConvertOptions(output_path="t.m4b", speech_friendly=on), engine=engine) \
+            ._synthesize_chapter(ch, "af_heart", 1, 1)
+        sent[on] = engine.calls
+    assert sent[True] == ["5. Anxious Days.", "King Renard 4 shook his head."]
+    assert sent[False] == ["V. Anxious Days.", "King Renard IV shook his head."]
+
+
 def test_cache_key_changes_only_with_settings_that_change_the_sound():
     key = lambda **kw: ConvertOptions(output_path="t.m4b", engine=EngineConfig(**kw)).cache_key()
     default = key()
+    assert ConvertOptions(output_path="t.m4b", speech_friendly=False).cache_key() != default
     assert key(device="cpu", threads=4, max_vram_gb=2, concurrency=8) == default
     assert key(model="kokoro-v1.1-zh") != default
     server = key(provider="openai", base_url="http://localhost:8880/v1")

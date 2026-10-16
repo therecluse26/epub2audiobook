@@ -25,6 +25,7 @@ except Exception:  # older bs4
     pass
 from ebooklib import epub, ITEM_DOCUMENT, ITEM_IMAGE, ITEM_COVER
 
+from .textproc import NUM_CLOSE, NUM_OPEN, roman_value
 from .voices import iso_to_kokoro
 
 # --------------------------------------------------------------------------------------
@@ -37,6 +38,7 @@ class Block:
     kind: str          # 'heading' | 'para' | 'break'
     text: str = ""
     level: int = 0     # heading level (1..6)
+    numerals: list[tuple[int, int]] = field(default_factory=list)  # spans of text that are surely Roman numerals
 
 
 @dataclass
@@ -94,7 +96,7 @@ SKIP_KINDS = {
     "cover", "titlepage", "halftitle", "copyright", "toc", "landmarks", "pagelist",
     "acknowledgments", "glossary", "index", "endnotes", "footnotes", "bibliography",
     "about-author", "about-publisher", "praise", "also-by", "ads", "resources", "colophon", "empty", "contributors",
-    "imprint", "credits",
+    "imprint", "credits", "license",
 }
 
 # epub:type / guide type / role -> kind
@@ -205,6 +207,12 @@ _BLOCK_TAGS = {"p", "div", "section", "article", "main", "body", "header", "bloc
                "h1", "h2", "h3", "h4", "h5", "h6", "hr", "address", "center", "details", "summary"}
 _HEADING_TAGS = {"h1": 1, "h2": 2, "h3": 3, "h4": 4, "h5": 5, "h6": 6}
 
+_GUTENBERG_IDS = {"pg-header", "pg-footer"}
+_GUTENBERG_CLASSES = {"pg-boilerplate", "pgheader"}
+# older Project Gutenberg files have no such markup, only these lines around the book
+_PG_START_RE = re.compile(r"^\*{3}\s*START OF (?:THE|THIS) PROJECT GUTENBERG", re.I)
+_PG_END_RE = re.compile(r"^(?:\*{3}\s*END OF (?:THE|THIS) PROJECT GUTENBERG|End of (?:the )?Project Gutenberg)", re.I)
+
 _NOTE_MARK_RE = re.compile(r"^\s*[\[\(]?\s*(\d{1,3}|[ivxlc]{1,5}|[*†‡§¶#a-z])\s*[\]\)]?\s*$", re.I)
 _SCENE_BREAK_RE = re.compile(r"^\s*(?:[\*•✱✲⁂~#\-–—_=·]\s*){1,7}\s*$|^\s*⁂\s*$")
 _PAGE_NUMBER_RE = re.compile(r"^\s*(?:page\s*)?(\d{1,4}|[ivxlcdm]{1,7})\s*$", re.I)
@@ -245,6 +253,8 @@ def _should_remove(tag: Tag) -> bool:
     if _REMOVE_CLASS_RE.search(_class_str(tag)):
         return True
     ident = str(tag.attrs.get("id", ""))
+    if ident in _GUTENBERG_IDS or _attr_tokens(tag, "class") & _GUTENBERG_CLASSES:
+        return True  # Project Gutenberg's header ("Release date: … [eBook #485]") and licence
     if tag.name in {"a", "span", "sup"} and re.match(r"^(fn|footnote|endnote|note|noteref|nref|ftn|page_?\d|pg\d)", ident, re.I):
         return True
     if tag.name == "a":
@@ -269,6 +279,20 @@ def _clean_soup(body: Tag) -> None:
             pass
     for br in body.find_all("br"):
         br.replace_with(" ")
+
+
+def _mark_tagged_numerals(body: Tag) -> None:
+    """Wrap the Roman numerals a publisher tagged (epub:type z3998:roman, used by Standard Ebooks) in the
+    numeral markers, so they can be spoken as numbers without guessing. _postprocess_blocks turns the markers
+    into Block.numerals."""
+    for tag in body.find_all(True):
+        if "z3998:roman" not in _attr_tokens(tag, "epub:type") or tag.find(True) is not None:
+            continue
+        text = tag.get_text()
+        num = text.strip()
+        if roman_value(num) is not None:
+            lead, trail = text[:len(text) - len(text.lstrip())], text[len(text.rstrip()):]
+            tag.string = f"{lead}{NUM_OPEN}{num}{NUM_CLOSE}{trail}"
 
 
 def _norm_ws(s: str) -> str:
@@ -375,6 +399,38 @@ def _merge_drop_caps(blocks: list[Block]) -> list[Block]:
     return out
 
 
+_MARKED_RE = re.compile(f"{NUM_OPEN}([^{NUM_OPEN}{NUM_CLOSE}]*){NUM_CLOSE}")
+_NUMERAL_ONLY_RE = re.compile(r"([IVXLC]+)([.:]?)")
+
+
+def _plain(s: str) -> str:
+    return s.replace(NUM_OPEN, "").replace(NUM_CLOSE, "")
+
+
+def _mark_numeral_only(b: Block) -> None:
+    """A heading or paragraph holding nothing but a Roman numeral ("V", "II.") is a chapter or part number.
+    Upper case only; a bare "I." paragraph being the pronoun is rare enough to accept."""
+    m = _NUMERAL_ONLY_RE.fullmatch(b.text)
+    if m and (roman_value(m.group(1)) or 999) <= 200:
+        b.text = f"{NUM_OPEN}{m.group(1)}{NUM_CLOSE}{m.group(2)}"
+
+
+def _take_numeral_marks(text: str) -> tuple[str, list[tuple[int, int]]]:
+    """Remove the numeral markers; return the clean text and the spans they enclosed."""
+    parts: list[str] = []
+    spans: list[tuple[int, int]] = []
+    pos = n = 0
+    for m in _MARKED_RE.finditer(text):
+        before = _plain(text[pos:m.start()])
+        parts += [before, m.group(1)]
+        n += len(before)
+        spans.append((n, n + len(m.group(1))))
+        n += len(m.group(1))
+        pos = m.end()
+    parts.append(_plain(text[pos:]))
+    return "".join(parts), spans
+
+
 def _postprocess_blocks(blocks: list[Block]) -> list[Block]:
     out: list[Block] = []
     blocks = _merge_drop_caps(blocks)
@@ -383,7 +439,7 @@ def _postprocess_blocks(blocks: list[Block]) -> list[Block]:
             if out and out[-1].kind != "break":
                 out.append(b)
             continue
-        t = b.text
+        t = _plain(b.text)
         if not t:
             continue
         if _SCENE_BREAK_RE.match(t):
@@ -392,13 +448,14 @@ def _postprocess_blocks(blocks: list[Block]) -> list[Block]:
             continue
         if b.kind == "para" and (_PAGE_NUMBER_RE.match(t) or _NOTE_MARK_RE.match(t)):
             continue  # stray page number / note marker
+        _mark_numeral_only(b)
         out.append(b)
     # merge consecutive heading lines ("1." + "A Sea Change on Pain")
     merged: list[Block] = []
     for b in out:
         if b.kind == "heading" and merged and merged[-1].kind == "heading":
             prev = merged[-1]
-            sep = " " if re.search(r"[.:!?]$", prev.text) else ". "
+            sep = " " if re.search(r"[.:!?]$", _plain(prev.text)) else ". "
             prev.text = f"{prev.text}{sep}{b.text}"
             continue
         merged.append(b)
@@ -406,7 +463,32 @@ def _postprocess_blocks(blocks: list[Block]) -> list[Block]:
         merged.pop()
     while merged and merged[0].kind == "break":
         merged.pop(0)
+    for b in merged:
+        b.text, b.numerals = _take_numeral_marks(b.text)
     return merged
+
+
+def _blocks_from_body(body: Tag) -> list[Block]:
+    """Narration blocks of one spine document (modifies `body`)."""
+    _clean_soup(body)
+    _mark_tagged_numerals(body)
+    return _postprocess_blocks(_extract_blocks(body))
+
+
+def _drop_gutenberg_text(blocks: list[Block]) -> tuple[list[Block], bool]:
+    """Cut an older Project Gutenberg file at its START/END lines; True when the END line was in it."""
+    for i, b in enumerate(blocks):
+        if _PG_START_RE.match(b.text):
+            blocks = blocks[i + 1:]
+            break
+    end = next((i for i, b in enumerate(blocks) if _PG_END_RE.match(b.text)), None)
+    if end is not None:
+        blocks = blocks[:end]
+    while blocks and blocks[0].kind == "break":
+        blocks.pop(0)
+    while blocks and blocks[-1].kind == "break":
+        blocks.pop()
+    return blocks, end is not None
 
 
 # --------------------------------------------------------------------------------------
@@ -580,6 +662,7 @@ def load_book(path: str | Path) -> Book:
 
     chapters: list[Chapter] = []
     idx = 0
+    after_pg_end = False  # past an old-style Project Gutenberg END line: only the licence follows
     for spine_entry in book.spine:
         item_id = spine_entry[0] if isinstance(spine_entry, (tuple, list)) else spine_entry
         item = book.get_item_with_id(item_id)
@@ -594,11 +677,13 @@ def load_book(path: str | Path) -> Book:
         props = getattr(item, "properties", []) or []
         doc_kind = "toc" if "nav" in props else _doc_epub_type(soup)
         raw_copy = BeautifulSoup(str(body), "lxml")
-        _clean_soup(body)
-        blocks = _postprocess_blocks(_extract_blocks(body))
+        blocks, pg_end = _drop_gutenberg_text(_blocks_from_body(body))
         kind = _classify(str(item_id), href, landmarks.get(_href_key(href)), doc_kind, blocks, raw_copy)
         if kind in {"body", "frontmatter", "backmatter"} and not blocks:
             kind = "empty"
+        if after_pg_end:
+            kind = "license"
+        after_pg_end = after_pg_end or pg_end
 
         ttl = toc.get(_href_key(href))
         if not ttl:
