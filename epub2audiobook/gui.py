@@ -316,7 +316,10 @@ class MainFrame(wx.Frame):
     def _selected_chapters(self) -> list[Chapter]:
         if not self.book:
             return []
-        return [ch for i, ch in enumerate(self.book.chapters) if self.list.IsItemChecked(i)]
+        # CheckItem fires EVT_LIST_ITEM_CHECKED while _book_loaded is still adding rows; the generic
+        # list control (GTK/macOS) crashes on IsItemChecked for a row that does not exist yet.
+        rows = self.list.GetItemCount()
+        return [ch for i, ch in enumerate(self.book.chapters[:rows]) if self.list.IsItemChecked(i)]
 
     def _set_all(self, value: bool):
         for i in range(self.list.GetItemCount()):
